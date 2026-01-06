@@ -1,0 +1,6 @@
+# Cheyava Falls - Sol 1217 Mastcam-Z images
+# Left Mastcam-Z
+https://mars.nasa.gov/mars2020-raw-images/pub/ods/surface/sol/01217/ids/edr/browse/zcam/ZL0_1217_0774975958_568ECM_N0560000ZCAM09259_1100LMJ01.png
+
+# Try some variations for other images from that sol
+# These are educated guesses based on naming patterns

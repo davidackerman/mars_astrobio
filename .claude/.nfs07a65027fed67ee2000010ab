@@ -1,0 +1,30 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(git -C /groups/scicompsoft/home/ackermand/Programming/mars_astrobio status)",
+      "Bash(tree:*)",
+      "Bash(chmod:*)",
+      "Bash(pixi --version:*)",
+      "Bash(pixi install:*)",
+      "Bash(pixi run:*)",
+      "Bash(cargo install:*)",
+      "Bash(rustup update:*)",
+      "Bash(sudo apt-get:*)",
+      "Bash(sudo apt-get install:*)",
+      "Bash(python scripts/download_data.py:*)",
+      "Bash(file:*)",
+      "Bash(curl:*)",
+      "Bash(xargs:*)",
+      "Bash(cat:*)",
+      "Bash(python3:*)",
+      "Bash(pip install:*)",
+      "Bash(pixi add:*)",
+      "Bash(/groups/scicompsoft/home/ackermand/Programming/mars_astrobio/.pixi/envs/default/bin/pip install:*)",
+      "Bash(python scripts/download_full_mission.py:*)",
+      "Bash(python:*)",
+      "Bash(find:*)",
+      "Bash(ls:*)",
+      "Bash(git -C /groups/scicompsoft/home/ackermand/Programming/mars_astrobio diff --stat)"
+    ]
+  }
+}

@@ -1,0 +1,116 @@
+# SimCLR Configuration for Mars Biosignature Detection
+
+# Model architecture
+model:
+  name: "simclr"
+  backbone: "resnet50"  # resnet18, resnet50, resnet101
+  pretrained: true      # Use ImageNet pretrained weights
+  projection_dim: 128   # Dimension of projection space
+  hidden_dim: 2048      # Hidden dimension in projection head
+
+# Training configuration
+training:
+  # Unsupervised learning parameters
+  epochs: 200
+  batch_size: 64  # Adjust based on GPU memory (256 ideal, use gradient accumulation)
+  accumulation_steps: 4  # Effective batch size = 256
+
+  # Optimizer: LARS (Layer-wise Adaptive Rate Scaling) for large batch training
+  optimizer:
+    type: "LARS"
+    base_lr: 0.3  # Will be scaled by batch_size/256
+    momentum: 0.9
+    weight_decay: 0.000001  # 1e-6
+
+  # Learning rate scheduler
+  scheduler:
+    type: "CosineAnnealingLR"
+    T_max: 200  # Match epochs
+    eta_min: 0.0
+    warmup_epochs: 10
+    warmup_start_lr: 0.0
+
+  # Loss function
+  loss:
+    type: "NTXentLoss"
+    temperature: 0.5  # τ parameter
+
+  # Mixed precision training
+  mixed_precision: true
+
+  # Gradient clipping
+  gradient_clip: 1.0
+
+# Data configuration
+data:
+  # Dataset paths
+  train_dir: "data/processed/watson_full"  # Will be converted from raw IMG files
+  image_size: 224
+
+  # Data loading
+  num_workers: 4
+  pin_memory: true
+  persistent_workers: true
+
+  # Augmentation for contrastive learning (strong augmentation)
+  augmentation:
+    # Crops and geometric transforms
+    resize: 256
+    crop_size: 224
+    random_crop: true
+    horizontal_flip: 0.5
+    vertical_flip: 0.5
+    rotation_degrees: 15
+
+    # Color augmentations
+    color_jitter:
+      brightness: 0.4
+      contrast: 0.4
+      saturation: 0.2
+      hue: 0.1
+    random_grayscale: 0.2
+
+    # Blur
+    gaussian_blur:
+      kernel_size: 23
+      sigma: [0.1, 2.0]
+      p: 0.5
+
+    # Normalization (ImageNet stats)
+    normalize:
+      mean: [0.485, 0.456, 0.406]
+      std: [0.229, 0.224, 0.225]
+
+# Linear probe evaluation (to measure representation quality)
+linear_probe:
+  enabled: true
+  eval_frequency: 10  # Evaluate every N epochs
+  num_classes: 5      # Texture classes
+  freeze_encoder: true
+  epochs: 100
+  batch_size: 32
+  learning_rate: 0.01
+
+# Checkpointing
+checkpointing:
+  save_frequency: 10  # Save every N epochs
+  save_top_k: 3       # Keep best 3 checkpoints
+  monitor: "linear_probe_accuracy"  # Metric to track
+  mode: "max"         # Maximize accuracy
+  save_last: true     # Always save last checkpoint
+  checkpoint_dir: "models/checkpoints/simclr"
+
+# Logging
+logging:
+  log_interval: 10    # Log every N batches
+  tensorboard: true
+  tensorboard_dir: "outputs/tensorboard/simclr"
+  log_dir: "outputs/logs/simclr"
+  log_level: "INFO"
+
+# Hardware
+hardware:
+  device: "cuda"
+  num_gpus: 1
+  deterministic: true
+  seed: 42

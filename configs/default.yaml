@@ -1,0 +1,135 @@
+# Default configuration for Mars Biosignature Detection
+
+project:
+  name: "mars_biosig"
+  root: "."
+  version: "0.1.0"
+
+# Data configuration
+data:
+  # PDS API settings
+  pds:
+    api_url: "https://api.nasa.gov/mars-photos/api/v1"
+    archive_url: "https://pds-geosciences.wustl.edu/missions/mars2020"
+    api_key: ${NASA_API_KEY}  # From environment variable
+    timeout: 30
+    max_retries: 3
+
+  # Paths
+  paths:
+    raw: "data/raw"
+    processed: "data/processed"
+    annotations: "data/annotations"
+    cache: "data/cache"
+
+  # Default data loader settings
+  dataloader:
+    batch_size: 32
+    num_workers: 4
+    pin_memory: true
+    persistent_workers: true
+
+# Model configuration
+model:
+  checkpoint_dir: "models/checkpoints"
+  production_dir: "models/production"
+
+  # Default architecture
+  architecture: "texture_cnn"
+  backbone: "resnet50"
+  pretrained: true
+  num_classes: 5
+
+# Training configuration
+training:
+  # Optimizer
+  optimizer:
+    type: "AdamW"
+    lr: 0.0001
+    weight_decay: 0.01
+    betas: [0.9, 0.999]
+
+  # Learning rate scheduler
+  scheduler:
+    type: "CosineAnnealingLR"
+    T_max: 50
+    eta_min: 0.000001
+
+  # Training parameters
+  epochs: 50
+  gradient_clip: 1.0
+  mixed_precision: true
+  accumulation_steps: 1
+
+  # Early stopping
+  early_stopping:
+    patience: 10
+    monitor: "val_loss"
+    mode: "min"
+
+  # Model checkpointing
+  checkpointing:
+    save_top_k: 3
+    monitor: "val_f1"
+    mode: "max"
+    save_last: true
+
+# Evaluation configuration
+evaluation:
+  metrics:
+    - "accuracy"
+    - "precision"
+    - "recall"
+    - "f1"
+    - "confusion_matrix"
+    - "roc_auc"
+
+  # Class-specific metrics
+  per_class_metrics: true
+
+# Inference configuration
+inference:
+  batch_size: 64
+  device: "cuda"
+  threshold: 0.5  # Classification threshold
+  top_k: 100  # Number of top candidates to output
+
+# Logging configuration
+logging:
+  level: "INFO"
+  tensorboard_dir: "outputs/tensorboard"
+  log_dir: "outputs/logs"
+
+  # TensorBoard
+  tensorboard:
+    enabled: true
+    log_interval: 10  # Log every N batches
+
+  # Experiment tracking
+  experiment_tracking:
+    enabled: false  # Set to true to use W&B or similar
+    platform: "wandb"  # "wandb", "mlflow", etc.
+
+# Hardware configuration
+hardware:
+  device: "cuda"  # "cuda" or "cpu"
+  num_gpus: 1
+  mixed_precision: true
+
+  # Distributed training (future)
+  distributed:
+    enabled: false
+    backend: "nccl"
+    world_size: 1
+
+# Reproducibility
+reproducibility:
+  seed: 42
+  deterministic: true
+  benchmark: false  # Set true for faster training (if deterministic not needed)
+
+# Output paths
+output:
+  predictions: "outputs/predictions"
+  visualizations: "outputs/visualizations"
+  reports: "outputs/reports"
