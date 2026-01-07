@@ -190,13 +190,12 @@ class IMGConverter:
         data_type = label.get('data_type', label.get('SAMPLE_TYPE', 'UnsignedByte'))
         sample_bits = label.get('SAMPLE_BITS', 8)
 
-        # Map PDS4 data types to sample bits
-        if 'UnsignedByte' in data_type or 'MSB_UNSIGNED_INTEGER' in data_type:
-            if 'Byte' in data_type:
-                sample_bits = 8
-            elif sample_bits == 0:
-                sample_bits = 8
-        elif 'UnsignedMSB2' in data_type or '16' in str(data_type):
+        # Map PDS4 data types to sample bits and signedness
+        if 'Byte' in data_type and '2' not in data_type:
+            sample_bits = 8
+        elif 'MSB2' in data_type or 'SignedMSB2' in data_type or 'UnsignedMSB2' in data_type:
+            sample_bits = 16
+        elif '16' in str(data_type):
             sample_bits = 16
 
         # Determine label size/offset (in bytes)
@@ -214,18 +213,25 @@ class IMGConverter:
         logger.info(f"Image dimensions: {lines}x{line_samples}, {sample_bits}-bit")
         logger.info(f"Label size: {lblsize} bytes")
 
-        # Determine dtype
+        # Determine dtype (handle signed/unsigned and byte order)
         if sample_bits == 8:
+            # 8-bit is always unsigned for images
             dtype = np.uint8
             bytes_per_sample = 1
         elif sample_bits == 16:
-            dtype = np.uint16
+            # Check if signed or unsigned, and byte order (MSB = big-endian)
+            if 'Signed' in data_type and 'Unsigned' not in data_type:
+                # Signed 16-bit big-endian
+                dtype = np.dtype('>i2')  # big-endian int16
+            else:
+                # Unsigned 16-bit big-endian
+                dtype = np.dtype('>u2')  # big-endian uint16
             bytes_per_sample = 2
         elif sample_bits == 32:
-            if 'REAL' in sample_type:
-                dtype = np.float32
+            if 'REAL' in data_type or 'Real' in data_type:
+                dtype = np.dtype('>f4')  # big-endian float32
             else:
-                dtype = np.uint32
+                dtype = np.dtype('>u4')  # big-endian uint32
             bytes_per_sample = 4
         else:
             raise ValueError(f"Unsupported sample_bits: {sample_bits}")

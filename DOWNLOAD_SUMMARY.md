@@ -1,110 +1,131 @@
-# Mars Raw Images Download Methods
+# PDS Atlas Download Guide - Quick Start
 
-## Two Different Data Sources
+## TL;DR - Get Started Fast
 
-### 1. PDS Archive (Current WATSON Pipeline)
-**URL Pattern**: `https://planetarydata.jpl.nasa.gov/img/data/mars2020/mars2020_imgops/data_watson_imgops/sol/`
-
-- **What it has**: WATSON camera images (close-up micro-imager on robotic arm)
-- **Format**: PDS4 format (.IMG files with .xml metadata)
-- **Coverage**: Lower sol numbers (0-314 available currently)
-- **Used by**: Your existing `scripts/download_data.py` pipeline
-
-### 2. NASA Raw Images Gallery (New - Used for Cheyava Falls)
-**URL**: `https://mars.nasa.gov/mars2020/multimedia/raw-images/`
-
-- **What it has**: ALL camera images from Perseverance, including:
-  - Mastcam-Z (ZL0/ZR0) - mast-mounted stereo cameras
-  - Navigation cameras (NCL/NCR)
-  - Hazard cameras (various)
-  - WATSON (also available here)
-  - And more...
-- **Format**: Browse images (.png) with access to raw (.IMG) files
-- **Coverage**: Up-to-date, includes recent sols (1217+)
-- **Access Pattern**: 
-  ```
-  https://mars.nasa.gov/mars2020-raw-images/pub/ods/surface/sol/{SOL:05d}/ids/edr/browse/zcam/{FILENAME}.png
-  ```
-
-## Why Two Different Sources?
-
-### PDS Archive (planetarydata.jpl.nasa.gov)
-- ✅ Structured, machine-readable PDS4 format
-- ✅ Complete metadata in XML
-- ✅ Official science archive
-- ❌ Delayed releases (batched every ~4 months)
-- ❌ Only has WATSON in `mars2020_imgops` endpoint
-
-### NASA Raw Images (mars.nasa.gov)
-- ✅ Near real-time updates (days after acquisition)
-- ✅ All cameras available
-- ✅ Web-friendly browse images
-- ✅ Can access higher sols (1200+)
-- ❌ Less structured (requires knowing exact filenames)
-- ❌ Browse images are lower resolution
-
-## What I Did for Cheyava Falls
-
-Since Cheyava Falls was discovered at **Sol 1215-1217** and uses **Mastcam-Z** (not WATSON), I:
-
-1. **Found the image ID** from NASA's raw images page:
-   ```
-   ZL0_1217_0774975958_568ECM_N0560000ZCAM09259_1100LMJ
-   ```
-
-2. **Downloaded browse image** from:
-   ```
-   https://mars.nasa.gov/mars2020-raw-images/pub/ods/surface/sol/01217/ids/edr/browse/zcam/ZL0_1217_0774975958_568ECM_N0560000ZCAM09259_1100LMJ01.png
-   ```
-
-3. **Downloaded official processed image** from NASA Photojournal:
-   ```
-   https://assets.science.nasa.gov/content/dam/science/psd/photojournal/pia/pia26/pia26370/PIA26370.jpg
-   https://assets.science.nasa.gov/content/dam/science/psd/photojournal/pia/pia26/pia26370/PIA26370.tif
-   ```
-
-## Camera Prefixes on mars.nasa.gov
-
-- **ZL0/ZR0**: Mastcam-Z Left/Right (high-res color, on mast)
-- **SI0/SI1**: SHERLOC (includes WATSON micro-imager)
-- **NCL/NCR**: Navigation cameras
-- **FCL/FCR**: Front hazard cameras
-- **RCL/RCR**: Rear hazard cameras
-- **PCL/PCR**: Parachute cameras
-- **And more...**
-
-## Recommendation for Your Pipeline
-
-### For Historical Data (Sol 0-300)
-✅ Use existing WATSON downloader with PDS archive
 ```bash
-python scripts/download_data.py --instrument watson --sols 0-100
+# Download just the biosignature discovery sites (RECOMMENDED!)
+pixi run download-cheyava   # ~few hundred images, minutes to download
+pixi run download-wildcat   # ~few hundred images, minutes to download
+
+# Or both at once
+pixi run download-biosig
 ```
 
-### For Recent Data or Other Cameras
-✅ Access mars.nasa.gov raw images:
-1. Browse images at: https://mars.nasa.gov/mars2020/multimedia/raw-images/
-2. Filter by sol, camera type
-3. Download using the URL pattern discovered
+## What Are These Sites?
 
-### For Published Science Images
-✅ Use NASA Photojournal (PIA catalog):
-- Browse: https://science.nasa.gov/photojournal/
-- Direct download pattern: `https://assets.science.nasa.gov/content/dam/science/psd/photojournal/pia/pia{SERIES}/pia{NUMBER}/PIA{NUMBER}.jpg`
+### Cheyava Falls
+**The most promising biosignature candidate found on Mars to date**
+- Discovered: July 2024 (Sol 1212-1218)
+- Features: "Leopard spots" with organic molecules and redox reactions
+- Images: ~few hundred from sols 1200-1220
+- Download time: Minutes
+- Read more: [NASA Announcement](https://science.nasa.gov/resource/perseverance-finds-a-rock-with-leopard-spots/)
 
-## Files Created
+### Wildcat Ridge
+**Strongest organic molecule detection on the mission**
+- Discovered: September 2022 (Sol 495-500)
+- Features: Aromatic organic molecules in ancient lake bed
+- Images: ~few hundred from sols 490-510
+- Download time: Minutes
+- Read more: [JPL News](https://www.jpl.nasa.gov/news/nasas-perseverance-rover-investigates-geologically-rich-mars-terrain/)
 
-I created these helper scripts:
-1. `download_cheyava_direct.py` - Downloads from mars.nasa.gov raw images
-2. `download_leopard_spots.py` - Downloads from NASA Photojournal
-3. Downloaded to: `data/cheyava_falls/`
+## Why Start With These Sites?
+
+1. **Scientific relevance**: These are the most interesting targets for biosignature detection
+2. **Fast download**: Get started in minutes, not hours
+3. **Proof of concept**: Test your pipeline on the most promising data first
+4. **Focused training**: Build initial models on high-value targets
+
+## Available Download Commands
+
+| Command | What It Downloads | Data Type | Image Count | Est. Time |
+|---------|-------------------|-----------|-------------|-----------|
+| `pixi run download-cheyava` | Cheyava Falls (sols 1200-1220) | RDR (processed) | ~few hundred | Minutes |
+| `pixi run download-wildcat` | Wildcat Ridge (sols 490-510) | RDR (processed) | ~few hundred | Minutes |
+| `pixi run download-biosig` | Both biosignature sites | RDR (processed) | ~1000 | Minutes |
+| `pixi run download-atlas` | Full mission archive | RDR (processed) | ~296,000 | 10-15 hrs |
+
+**Data Types:**
+- **RDR (Reduced Data Record)**: Processed, focus-merged, best-quality images (default, recommended)
+- **EDR (Experimental Data Record)**: Raw, unprocessed images (use `--use-raw` flag)
+
+See [docs/RDR_vs_EDR.md](docs/RDR_vs_EDR.md) for details on the differences.
+
+## Custom Sol Filtering
+
+You can also specify custom sol ranges:
+
+```bash
+# Download a specific sol range (RDR processed)
+pixi run python scripts/download_pds_atlas.py \
+  pdsimg-atlas-curl_2026-01-06T01_11_53_944.bat \
+  data/raw/watson_browse \
+  8 \
+  --sols 1000-1100
+
+# Download multiple specific sols
+pixi run python scripts/download_pds_atlas.py \
+  pdsimg-atlas-curl_2026-01-06T01_11_53_944.bat \
+  data/raw/watson_browse \
+  8 \
+  --sols 495,1212,1218
+
+# Download multiple ranges
+pixi run python scripts/download_pds_atlas.py \
+  pdsimg-atlas-curl_2026-01-06T01_11_53_944.bat \
+  data/raw/watson_browse \
+  8 \
+  --sols 490-510,1200-1220
+
+# Download raw EDR data instead of processed RDR
+pixi run python scripts/download_pds_atlas.py \
+  pdsimg-atlas-curl_2026-01-06T01_11_53_944.bat \
+  data/raw/watson_raw \
+  8 \
+  --sols cheyava \
+  --use-raw
+```
+
+## Features
+
+- **8x faster** than the provided shell script (parallel downloads)
+- **Smart resume** - automatically skips already downloaded files
+- **Progress tracking** - real-time progress bar
+- **Organized output** - files organized by sol number
+- **Error handling** - retries failed downloads, logs errors
+
+## File Organization
+
+Downloaded files are automatically organized by sol:
+
+```
+data/raw/watson_browse/
+├── sol_0490/
+│   ├── SI1_0490_0xxx_xxx_xxx.png
+│   └── ...
+├── sol_1212/
+│   ├── SI1_1212_0xxx_xxx_xxx.png  # Cheyava Falls images
+│   └── ...
+└── sol_1220/
+    └── ...
+```
 
 ## Next Steps
 
-To extend your pipeline to support Mastcam-Z and other cameras from mars.nasa.gov:
+After downloading:
 
-1. Create `src/mars_biosig/data/downloaders/mastcamz.py`
-2. Implement sol listing from https://mars.nasa.gov/mars2020/multimedia/raw-images/
-3. Parse image listing pages to get filenames
-4. Download using discovered URL patterns
+1. **Explore the images** - Check out the downloaded files in your file browser
+2. **Run preparation** - `pixi run prepare-data` to organize into train/val/test splits
+3. **Train a model** - `pixi run train` to start training on biosignature detection
+4. **Expand dataset** - Download more sols as needed with custom filters
 
+## More Information
+
+- See [DOWNLOAD_COMPARISON.md](DOWNLOAD_COMPARISON.md) for detailed comparison of download methods
+- See [README.md](README.md) for full project documentation
+
+## References
+
+- [Cheyava Falls - NASA Science](https://science.nasa.gov/resource/perseverance-finds-a-rock-with-leopard-spots/)
+- [Wildcat Ridge - JPL News](https://www.jpl.nasa.gov/news/nasas-perseverance-rover-investigates-geologically-rich-mars-terrain/)
+- [PDS Imaging Atlas](https://pds-imaging.jpl.nasa.gov/beta/cart)
