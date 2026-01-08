@@ -1,0 +1,43 @@
+# Backyard Worlds Brown Dwarf Detection Pipeline Configuration
+
+pipeline_name: "backyard_worlds_brown_dwarf"
+output_dir: "outputs/backyard_worlds"
+
+# Panoptes authentication (optional - for higher API rate limits)
+# Can also be provided via --username and --password command-line arguments
+panoptes_auth:
+  username: null  # Set to your Zooniverse username
+  password: null  # Set to your Zooniverse password
+
+# Download parameters
+download:
+  limit: 5000  # Number of subjects to download (start with 5k, scale up later)
+  subject_set_id: null  # Optional: specific subject set ID (null = all subjects)
+
+# DINOv3 embedding extraction
+embedding:
+  model_name: "dinov3_vitb14"  # 768-dim embeddings (RECOMMENDED)
+  # Alternatives: dinov3_vits14 (384-dim), dinov3_vitl14 (1024-dim), dinov3_vitg14 (1536-dim)
+  device: "cuda"               # 'cuda' or 'cpu'
+  use_half_precision: false    # Use FP16 (faster, requires CUDA)
+
+# HDBSCAN clustering (behavior categories)
+clustering:
+  min_cluster_size: 50   # Minimum subjects per cluster (~1% of dataset)
+  min_samples: 10        # Neighborhood size for core points
+  metric: "euclidean"    # Distance metric
+  cluster_selection_epsilon: 0.0  # Cluster merging threshold (0.0 = auto)
+
+# Brown dwarf scoring weights
+brown_dwarf_scoring:
+  weights:
+    motion_consistency: 0.40   # Slow, consistent proper motion
+    point_source: 0.20         # PSF-like morphology
+    red_color: 0.20            # W1-W2 color index (red in IR)
+    novelty: 0.15              # Embedding outlier score
+    artifact_penalty: -0.05    # Penalty for edge effects, artifacts
+
+# Gallery generation
+gallery:
+  top_n_candidates: 500   # Number of top brown dwarf candidates to save
+  top_k_per_cluster: 10   # Number of representative subjects per behavior cluster
