@@ -27,7 +27,7 @@ class BackyardWorldsDownloader:
         retry_delay: Delay between retries in seconds (default: 5)
     """
 
-    BACKYARD_WORLDS_PROJECT_ID = 1901  # Backyard Worlds: Planet 9
+    BACKYARD_WORLDS_PROJECT_ID = 2416  # Backyard Worlds: Planet 9
 
     def __init__(
         self,
@@ -43,35 +43,22 @@ class BackyardWorldsDownloader:
         self.max_retries = max_retries
         self.retry_delay = retry_delay
 
-        # Try to use Panoptes client if available
+        # Use direct API access (more reliable than Panoptes client)
         self.use_panoptes = False
-        try:
-            from panoptes_client import Panoptes, Project
+        self.username = username
+        self.password = password
 
-            # Login if credentials provided
-            if username and password:
-                logger.info(f"Logging into Panoptes as {username}")
-                Panoptes.connect(username=username, password=password)
-            else:
-                logger.info("Connecting to Panoptes anonymously")
-                Panoptes.connect()
-
-            self.project = Project.find(self.BACKYARD_WORLDS_PROJECT_ID)
-            self.use_panoptes = True
-            logger.info(f"Connected to project: {self.project.display_name}")
-
-        except ImportError:
-            logger.warning(
-                "panoptes-client not available. "
-                "Install with: pip install panoptes-client"
-            )
-            logger.info("Will use direct API access instead")
-            self.use_panoptes = False
+        logger.info("Using direct Zooniverse API access")
+        if username and password:
+            logger.info(f"Will authenticate as {username}")
+        else:
+            logger.info("Using anonymous access (may have lower rate limits)")
 
     def download_subjects(
         self,
         limit: int = 1000,
         subject_set_id: Optional[int] = None,
+        retired: Optional[bool] = None,
     ) -> List[Dict]:
         """
         Download subject flipbooks.
@@ -79,39 +66,65 @@ class BackyardWorldsDownloader:
         Args:
             limit: Maximum number of subjects to download
             subject_set_id: Optional specific subject set ID to download from
+            retired: Optional filter - True for retired (examined), False for active (unexamined), None for all
 
         Returns:
             List of subject metadata dictionaries with local frame paths
         """
-        if self.use_panoptes:
-            return self._download_with_panoptes(limit, subject_set_id)
-        else:
-            return self._download_with_api(limit, subject_set_id)
+        return self._download_with_panoptes(limit, subject_set_id, retired)
 
     def _download_with_panoptes(
         self,
         limit: int,
         subject_set_id: Optional[int],
+        retired: Optional[bool],
     ) -> List[Dict]:
         """Download subjects using Panoptes Python client."""
-        from panoptes_client import SubjectSet
+        from panoptes_client import Panoptes, Project, SubjectSet, Subject
 
-        logger.info(f"Downloading up to {limit} subjects using Panoptes client")
+        filter_msg = ""
+        if retired is True:
+            filter_msg = " (retired/examined only)"
+        elif retired is False:
+            filter_msg = " (active/unexamined only)"
+
+        logger.info(f"Downloading up to {limit} subjects{filter_msg} using Panoptes client")
+
+        # Connect to Panoptes
+        if self.username and self.password:
+            Panoptes.connect(username=self.username, password=self.password)
+        else:
+            Panoptes.connect()
+
+        # Get project
+        project = Project.find(self.BACKYARD_WORLDS_PROJECT_ID)
 
         subjects_metadata = []
 
-        # Get subjects from project or specific subject set
-        if subject_set_id:
+        # Get subjects based on retirement status
+        if retired is not None:
+            # Use direct Subject query with retirement filter
+            logger.info(f"Querying subjects with retired={retired}")
+            subjects_iter = Subject.where(project_id=self.BACKYARD_WORLDS_PROJECT_ID, retired=retired)
+            logger.info(f"Downloading {'retired' if retired else 'active'} subjects from project")
+        elif subject_set_id:
             subject_set = SubjectSet.find(subject_set_id)
             subjects_iter = subject_set.subjects
             logger.info(f"Downloading from subject set {subject_set_id}")
         else:
-            subjects_iter = self.project.subjects
-            logger.info("Downloading from all project subjects")
+            # Get first subject set (they're already loaded in project.links.subject_sets)
+            subject_sets = project.links.subject_sets
+            if not subject_sets:
+                raise ValueError("No subject sets found for project")
+
+            subject_set = subject_sets[0]
+            subjects_iter = subject_set.subjects
+            logger.info(f"Downloading from subject set: {subject_set.display_name}")
 
         # Iterate through subjects
-        for i, subject in enumerate(tqdm(subjects_iter, desc="Downloading subjects", total=limit)):
-            if i >= limit:
+        downloaded_count = 0
+        for subject in tqdm(subjects_iter, desc="Downloading subjects", total=limit):
+            if downloaded_count >= limit:
                 break
 
             # Create subject directory
@@ -119,13 +132,24 @@ class BackyardWorldsDownloader:
             subject_dir.mkdir(exist_ok=True, parents=True)
 
             # Download each frame in the flipbook
+            # Locations is a list of dicts like [{'image/jpeg': 'url1'}, {'image/jpeg': 'url2'}]
             frame_paths = []
-            for location_idx, (location_key, location_url) in enumerate(
-                subject.locations.items()
-            ):
-                # Determine file extension from URL
-                parsed_url = urlparse(location_url)
-                ext = Path(parsed_url.path).suffix or '.fits'
+            for location_idx, location_dict in enumerate(subject.locations):
+                # Extract URL from the location dictionary
+                mime_type = list(location_dict.keys())[0]
+                location_url = location_dict[mime_type]
+
+                # Determine file extension from MIME type or URL
+                if 'jpeg' in mime_type or 'jpg' in mime_type:
+                    ext = '.jpg'
+                elif 'png' in mime_type:
+                    ext = '.png'
+                elif 'fits' in mime_type:
+                    ext = '.fits'
+                else:
+                    # Fallback to URL extension
+                    parsed_url = urlparse(location_url)
+                    ext = Path(parsed_url.path).suffix or '.jpg'
 
                 # Download frame
                 frame_filename = f"frame_{location_idx:02d}{ext}"
@@ -147,6 +171,8 @@ class BackyardWorldsDownloader:
                     'dec': subject.metadata.get('!Dec'),
                 }
             )
+
+            downloaded_count += 1
 
         logger.info(f"Downloaded {len(subjects_metadata)} subjects")
         return subjects_metadata
@@ -235,6 +261,181 @@ class BackyardWorldsDownloader:
 
         logger.info(f"Downloaded {len(subjects_metadata)} subjects")
         return subjects_metadata
+
+    def download_classifications(
+        self,
+        subject_ids: Optional[List[int]] = None,
+        workflow_id: Optional[int] = None,
+        limit: Optional[int] = None,
+    ) -> List[Dict]:
+        """
+        Download classification data for subjects.
+
+        Note: The Panoptes API may not return all classifications through the standard
+        query interface. For complete data, you may need to request a data export from
+        the Zooniverse project page or use the project builder's data export feature.
+
+        Args:
+            subject_ids: Optional list of specific subject IDs to get classifications for
+            workflow_id: Optional workflow ID to filter classifications
+            limit: Optional maximum number of classifications to download
+
+        Returns:
+            List of classification dictionaries containing volunteer annotations
+        """
+        from panoptes_client import Panoptes, Project, Classification
+
+        logger.info("Downloading classifications using Panoptes client")
+        logger.info("Note: API queries may not return all classifications. For complete data,")
+        logger.info("use the data export feature from the Zooniverse project page.")
+
+        # Connect to Panoptes
+        if self.username and self.password:
+            Panoptes.connect(username=self.username, password=self.password)
+        else:
+            Panoptes.connect()
+
+        # Get project to find workflows if not specified
+        if workflow_id is None:
+            project = Project.find(self.BACKYARD_WORLDS_PROJECT_ID)
+            workflows = project.links.workflows
+            if workflows:
+                workflow_id = workflows[0].id
+                logger.info(f"Using workflow ID: {workflow_id}")
+
+        classifications_data = []
+
+        if subject_ids:
+            logger.info(f"Fetching classifications for {len(subject_ids)} specific subjects")
+            # Query by workflow and filter for subjects locally
+            try:
+                query_params = {'project_id': self.BACKYARD_WORLDS_PROJECT_ID}
+                if workflow_id:
+                    query_params['workflow_id'] = workflow_id
+
+                classifications = Classification.where(**query_params)
+
+                subject_ids_set = set(subject_ids)
+                for classification in tqdm(classifications, desc="Fetching classifications"):
+                    if limit and len(classifications_data) >= limit:
+                        break
+
+                    try:
+                        # Get subject IDs from this classification
+                        classification_subject_ids = classification.raw.get('links', {}).get('subjects', [])
+
+                        # Check if any of our target subjects are in this classification
+                        if any(int(sid) in subject_ids_set for sid in classification_subject_ids):
+                            classifications_data.append(
+                                {
+                                    'classification_id': classification.id,
+                                    'subject_ids': classification_subject_ids,
+                                    'workflow_id': classification.raw.get('links', {}).get('workflow'),
+                                    'user_id': classification.raw.get('links', {}).get('user'),
+                                    'created_at': classification.raw.get('created_at'),
+                                    'annotations': classification.raw.get('annotations', []),
+                                    'metadata': classification.raw.get('metadata', {}),
+                                }
+                            )
+                    except Exception as e:
+                        logger.debug(f"Failed to parse classification {classification.id}: {e}")
+                        continue
+
+            except Exception as e:
+                logger.error(f"Failed to fetch classifications: {e}")
+
+        else:
+            # Download all classifications for the project
+            logger.info("Fetching all classifications for project")
+            query_params = {'project_id': self.BACKYARD_WORLDS_PROJECT_ID}
+            if workflow_id:
+                query_params['workflow_id'] = workflow_id
+
+            try:
+                classifications = Classification.where(**query_params)
+
+                for idx, classification in enumerate(
+                    tqdm(classifications, desc="Downloading classifications", total=limit)
+                ):
+                    if limit and idx >= limit:
+                        break
+
+                    try:
+                        # Extract subject IDs from links
+                        subject_ids_in_classification = classification.raw.get('links', {}).get('subjects', [])
+
+                        classifications_data.append(
+                            {
+                                'classification_id': classification.id,
+                                'subject_ids': subject_ids_in_classification,
+                                'workflow_id': classification.raw.get('links', {}).get('workflow'),
+                                'user_id': classification.raw.get('links', {}).get('user'),
+                                'created_at': classification.raw.get('created_at'),
+                                'annotations': classification.raw.get('annotations', []),
+                                'metadata': classification.raw.get('metadata', {}),
+                            }
+                        )
+
+                    except Exception as e:
+                        logger.warning(f"Failed to parse classification {classification.id}: {e}")
+                        continue
+
+            except Exception as e:
+                logger.error(f"Failed to fetch classifications: {e}")
+
+        logger.info(f"Downloaded {len(classifications_data)} classifications")
+        return classifications_data
+
+    def request_data_export(self) -> Dict:
+        """
+        Request a data export from Zooniverse for the Backyard Worlds project.
+
+        This generates a complete export of classifications which can be downloaded once ready.
+        Requires authentication with project owner/collaborator credentials.
+
+        Returns:
+            Dictionary with export request information
+        """
+        from panoptes_client import Panoptes, Project
+
+        logger.info("Requesting data export from Zooniverse")
+
+        # Must be authenticated
+        if not (self.username and self.password):
+            raise ValueError("Data export requires authentication (username and password)")
+
+        Panoptes.connect(username=self.username, password=self.password)
+
+        # Get project
+        project = Project.find(self.BACKYARD_WORLDS_PROJECT_ID)
+
+        # Request export
+        try:
+            export = project.get_export(
+                'classifications',
+                generate=True,
+                wait=False,
+                wait_timeout=300,
+            )
+            logger.info("Export requested successfully!")
+            logger.info("Check the project's Data Exports page to download when ready:")
+            logger.info(f"https://www.zooniverse.org/lab/{project.id}/data-exports")
+
+            return {
+                'status': 'requested',
+                'project_id': self.BACKYARD_WORLDS_PROJECT_ID,
+                'export_url': f"https://www.zooniverse.org/lab/{project.id}/data-exports",
+            }
+
+        except Exception as e:
+            logger.error(f"Failed to request export: {e}")
+            logger.info(
+                "You may need project owner/collaborator permissions to request data exports"
+            )
+            logger.info(
+                f"Alternatively, download from: https://www.zooniverse.org/projects/marckuchner/backyard-worlds-planet-9/data-exports"
+            )
+            raise
 
     def _download_file(self, url: str, output_path: Path) -> bool:
         """

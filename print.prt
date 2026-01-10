@@ -1,0 +1,192 @@
+Object = mroctx2isis
+  IsisVersion       = "8.2.0  | 2024-08-17"
+  ProgramVersion    = 2016-06-10
+  ProgramPath       = /groups/scicompsoft/home/ackermand/miniconda3/envs/isis-
+                      3/bin
+  ExecutionDateTime = 2026-01-08T22:45:10
+  HostName          = Unknown
+  UserName          = ackermand
+  Description       = "Import an MRO CTX image as an Isis cube"
+
+  Group = UserParameters
+    FROM    = data/test/ctx_single/MOI_000009_0186_XI_18S051W.IMG
+    TO      = data/test/ctx_single/MOI_000009_0186_XI_18S051W.cub
+    SUFFIX  = 18
+    FILLGAP = true
+  End_Group
+
+  Group = Error
+    Program = mroctx2isis
+    Code    = 1
+    Message = "No existing files found with a numerical version matching
+               [ctxsqroot_???.lut] in
+               [/groups/scicompsoft/home/ackermand/Programming/mars_astrobio/i-
+               sis3data/mro/calibration]"
+    File    = FileName.cpp
+    Line    = 669
+  End_Group
+End_Object
+
+
+Object = mroctx2isis
+  IsisVersion       = "8.2.0  | 2024-08-17"
+  ProgramVersion    = 2016-06-10
+  ProgramPath       = /groups/scicompsoft/home/ackermand/miniconda3/envs/isis-
+                      3/bin
+  ExecutionDateTime = 2026-01-08T23:07:27
+  HostName          = Unknown
+  UserName          = ackermand
+  Description       = "Import an MRO CTX image as an Isis cube"
+
+  Group = UserParameters
+    FROM    = data/test/ctx_single/MOI_000009_0186_XI_18S051W.IMG
+    TO      = data/test/ctx_single/MOI_000009_0186_XI_18S051W.cub
+    SUFFIX  = 18
+    FILLGAP = true
+  End_Group
+
+  Group = Error
+    Program = mroctx2isis
+    Code    = 1
+    Message = "No existing files found with a numerical version matching
+               [ctxsqroot_???.lut] in
+               [/groups/scicompsoft/home/ackermand/Programming/mars_astrobio/i-
+               sis3data/mro/calibration]"
+    File    = FileName.cpp
+    Line    = 669
+  End_Group
+End_Object
+
+
+Object = mroctx2isis
+  IsisVersion       = "8.2.0  | 2024-08-17"
+  ProgramVersion    = 2016-06-10
+  ProgramPath       = /groups/scicompsoft/home/ackermand/miniconda3/envs/isis-
+                      3/bin
+  ExecutionDateTime = 2026-01-08T23:09:01
+  HostName          = Unknown
+  UserName          = ackermand
+  Description       = "Import an MRO CTX image as an Isis cube"
+
+  Group = UserParameters
+    FROM    = data/test/ctx_single/MOI_000009_0186_XI_18S051W.IMG
+    TO      = data/test/ctx_single/MOI_000009_0186_XI_18S051W.cub
+    SUFFIX  = 18
+    FILLGAP = true
+  End_Group
+
+  Group = Accounting
+    ConnectTime = 00:00:21.1
+    CpuTime     = 00:00:15.2
+  End_Group
+End_Object
+
+
+Object = spiceinit
+  IsisVersion       = "8.2.0  | 2024-08-17"
+  ProgramVersion    = 2021-08-10
+  ProgramPath       = /groups/scicompsoft/home/ackermand/miniconda3/envs/isis-
+                      3/bin
+  ExecutionDateTime = 2026-01-08T23:09:22
+  HostName          = Unknown
+  UserName          = ackermand
+  Description       = "Update SPICE data (kernels, pointing, and position) for
+                       a camera cube"
+
+  Group = UserParameters
+    FROM         = data/test/ctx_single/MOI_000009_0186_XI_18S051W.cub
+    WEB          = false
+    ATTACH       = TRUE
+    CKSMITHED    = FALSE
+    CKRECON      = TRUE
+    CKPREDICTED  = FALSE
+    CKNADIR      = FALSE
+    SPKSMITHED   = FALSE
+    SPKRECON     = TRUE
+    SPKPREDICTED = FALSE
+    SHAPE        = SYSTEM
+    STARTPAD     = 0.0
+    ENDPAD       = 0.0
+    URL          = https://astrogeology.usgs.gov/apis/ale/v0.9.1/spiceserver/
+    PORT         = 443
+  End_Group
+
+  Group = Error
+    Program = spiceinit
+    Code    = 1
+    Message = "No existing files found with a numerical version matching
+               [kernels.????.db] in
+               [/groups/scicompsoft/home/ackermand/Programming/mars_astrobio/i-
+               sis3data/base/kernels/lsk]"
+    File    = FileName.cpp
+    Line    = 669
+  End_Group
+End_Object
+
+
+Object = mroctx2isis
+  IsisVersion       = "8.2.0  | 2024-08-17"
+  ProgramVersion    = 2016-06-10
+  ProgramPath       = /groups/scicompsoft/home/ackermand/miniconda3/envs/isis-
+                      3/bin
+  ExecutionDateTime = 2026-01-08T23:20:32
+  HostName          = Unknown
+  UserName          = ackermand
+  Description       = "Import an MRO CTX image as an Isis cube"
+
+  Group = UserParameters
+    FROM    = data/test/ctx_single/MOI_000009_0186_XI_18S051W.IMG
+    TO      = data/test/ctx_single/MOI_000009_0186_XI_18S051W.cub
+    SUFFIX  = 18
+    FILLGAP = true
+  End_Group
+
+  Group = Accounting
+    ConnectTime = 00:00:21.3
+    CpuTime     = 00:00:15.4
+  End_Group
+End_Object
+
+
+Object = spiceinit
+  IsisVersion       = "8.2.0  | 2024-08-17"
+  ProgramVersion    = 2021-08-10
+  ProgramPath       = /groups/scicompsoft/home/ackermand/miniconda3/envs/isis-
+                      3/bin
+  ExecutionDateTime = 2026-01-08T23:20:54
+  HostName          = Unknown
+  UserName          = ackermand
+  Description       = "Update SPICE data (kernels, pointing, and position) for
+                       a camera cube"
+
+  Group = UserParameters
+    FROM         = data/test/ctx_single/MOI_000009_0186_XI_18S051W.cub
+    WEB          = false
+    ATTACH       = TRUE
+    CKSMITHED    = FALSE
+    CKRECON      = TRUE
+    CKPREDICTED  = FALSE
+    CKNADIR      = FALSE
+    SPKSMITHED   = FALSE
+    SPKRECON     = TRUE
+    SPKPREDICTED = FALSE
+    SHAPE        = SYSTEM
+    STARTPAD     = 0.0
+    ENDPAD       = 0.0
+    URL          = https://astrogeology.usgs.gov/apis/ale/v0.9.1/spiceserver/
+    PORT         = 443
+  End_Group
+
+  Group = Error
+    Program = spiceinit
+    Code    = 1
+    Message = "No existing files found with a numerical version matching
+               [kernels.????.db] in
+               [/groups/scicompsoft/home/ackermand/Programming/mars_astrobio/i-
+               sis3data/base/kernels/spk]"
+    File    = FileName.cpp
+    Line    = 669
+  End_Group
+End_Object
+
+
