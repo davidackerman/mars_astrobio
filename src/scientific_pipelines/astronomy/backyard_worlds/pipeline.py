@@ -4,6 +4,7 @@ import logging
 from pathlib import Path
 from typing import Dict, List, Optional
 
+import numpy as np
 import pandas as pd
 from tqdm import tqdm
 
@@ -115,8 +116,30 @@ class BackyardWorldsPipeline:
             logger.info("STEP 2: Encoding Flipbook Sequences")
             logger.info("=" * 80)
 
-            embeddings = []
-            for subject in tqdm(subjects_metadata, desc="Encoding flipbooks"):
+            # Check for existing checkpoint
+            checkpoint_path = self.output_dir / "embeddings_checkpoint.parquet"
+            embeddings_output = self.output_dir / "embeddings.parquet"
+
+            if checkpoint_path.exists():
+                logger.info(f"Found checkpoint at {checkpoint_path}, resuming...")
+                import pyarrow.parquet as pq
+                checkpoint_df = pq.read_table(checkpoint_path).to_pandas()
+                completed_ids = set(checkpoint_df['subject_id'].values)
+                embeddings = checkpoint_df['embedding'].tolist()
+                start_idx = len(embeddings)
+                logger.info(f"Resuming from {start_idx}/{len(subjects_metadata)} subjects")
+            else:
+                completed_ids = set()
+                embeddings = []
+                start_idx = 0
+
+            # Encode with checkpointing every 100 subjects
+            checkpoint_interval = 100
+            for idx, subject in enumerate(tqdm(subjects_metadata, desc="Encoding flipbooks", initial=start_idx)):
+                # Skip already completed subjects
+                if subject['subject_id'] in completed_ids:
+                    continue
+
                 frame_paths = [Path(p) for p in subject['frame_paths']]
 
                 try:
@@ -131,9 +154,19 @@ class BackyardWorldsPipeline:
                         self.sequence_encoder.sequence_embedding_dim * [0.0]
                     )
 
-            embeddings = pd.np.array(embeddings)
+                # Save checkpoint periodically
+                if (idx + 1) % checkpoint_interval == 0 and idx >= start_idx:
+                    checkpoint_df = pd.DataFrame({
+                        'subject_id': [s['subject_id'] for s in subjects_metadata[:idx+1]],
+                        'embedding': embeddings,
+                        'embedding_dim': len(embeddings[0]) if embeddings else 0,
+                    })
+                    checkpoint_df.to_parquet(checkpoint_path, index=False)
+                    logger.info(f"Checkpoint saved: {idx+1}/{len(subjects_metadata)} subjects encoded")
 
-            # Save embeddings
+            embeddings = np.array(embeddings)
+
+            # Save final embeddings
             embeddings_df = pd.DataFrame(
                 {
                     'subject_id': [s['subject_id'] for s in subjects_metadata],
@@ -142,13 +175,17 @@ class BackyardWorldsPipeline:
                 }
             )
 
-            embeddings_output = self.output_dir / "embeddings.parquet"
             embeddings_df.to_parquet(embeddings_output, index=False)
             logger.info(f"Embeddings saved to {embeddings_output}")
             logger.info(
                 f"Encoded embeddings: shape={embeddings.shape}, "
                 f"dim={embeddings.shape[1]}"
             )
+
+            # Remove checkpoint file after successful completion
+            if checkpoint_path.exists():
+                checkpoint_path.unlink()
+                logger.info("Checkpoint file removed after successful completion")
 
         else:
             # Load existing embeddings
@@ -159,7 +196,7 @@ class BackyardWorldsPipeline:
 
             table = pq.read_table(embeddings_output)
             df = table.to_pandas()
-            embeddings = pd.np.vstack(df['embedding'].values)
+            embeddings = np.vstack(df['embedding'].values)
 
             logger.info(f"Loaded embeddings: shape={embeddings.shape}")
 

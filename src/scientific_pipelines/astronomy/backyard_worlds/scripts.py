@@ -92,6 +92,29 @@ Examples:
 
     # Override output directory if specified
     output_dir = args.output or Path(config.get('output_dir', 'outputs/backyard_worlds'))
+    output_dir = Path(output_dir)
+    output_dir.mkdir(parents=True, exist_ok=True)
+
+    # Set up file logging in addition to console
+    log_dir = output_dir / "logs"
+    log_dir.mkdir(exist_ok=True)
+
+    from datetime import datetime
+    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+    log_file = log_dir / f"pipeline_{timestamp}.log"
+
+    file_handler = logging.FileHandler(log_file)
+    file_handler.setLevel(logging.INFO)
+    file_handler.setFormatter(logging.Formatter(
+        '%(asctime)s - %(name)s - %(levelname)s - %(message)s'
+    ))
+
+    # Add file handler to root logger
+    root_logger = logging.getLogger()
+    root_logger.addHandler(file_handler)
+
+    logger.info(f"Logging to file: {log_file}")
+    logger.info(f"Output directory: {output_dir}")
 
     # Override Panoptes credentials if provided
     if args.username or args.password:
