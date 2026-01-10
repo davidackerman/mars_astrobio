@@ -1,0 +1,58 @@
+# Backyard Worlds Moving Object Detection Pipeline Configuration
+
+pipeline_name: "backyard_worlds_moving_objects"
+output_dir: "outputs/backyard_worlds_movers"
+
+# Scorer type: "moving_object" for general movers, "brown_dwarf" for brown dwarf specific
+scorer_type: "moving_object"
+
+# Panoptes authentication (optional - for higher API rate limits)
+# Can also be provided via --username and --password command-line arguments
+panoptes_auth:
+  username: null  # Set to your Zooniverse username
+  password: null  # Set to your Zooniverse password
+
+# Download parameters
+download:
+  limit: 5000  # Number of subjects to download (start with 5k, scale up later)
+  subject_set_id: null  # Optional: specific subject set ID (null = all subjects)
+
+# DINOv3 embedding extraction
+embedding:
+  model_name: "dinov3_vitb14"  # 768-dim embeddings (RECOMMENDED)
+  # Alternatives: dinov3_vits14 (384-dim), dinov3_vitl14 (1024-dim), dinov3_vitg14 (1536-dim)
+  device: "cuda"               # 'cuda' or 'cpu'
+  use_half_precision: false    # Use FP16 (faster, requires CUDA)
+
+# HDBSCAN clustering (behavior categories)
+clustering:
+  min_cluster_size: 50   # Minimum subjects per cluster (~1% of dataset)
+  min_samples: 10        # Neighborhood size for core points
+  metric: "euclidean"    # Distance metric
+  cluster_selection_epsilon: 0.0  # Cluster merging threshold (0.0 = auto)
+
+# Moving object scoring weights
+moving_object_scoring:
+  weights:
+    motion_magnitude: 0.30      # Non-zero displacement detection
+    motion_consistency: 0.25    # Linear vs erratic motion
+    temporal_coherence: 0.20    # Object appears in all frames
+    novelty: 0.15               # Embedding outlier score
+    dipole_signature: 0.10      # WISE-specific bright/dark pairs
+    artifact_penalty: -0.10     # Penalty for edge effects, artifacts
+
+  # Tunable parameters
+  optimal_motion_magnitude: 0.15   # Target motion magnitude (higher than brown dwarfs: 0.1)
+  consistency_threshold: 0.7       # Minimum consistency for high-quality candidates
+  coherence_threshold: 0.6         # Minimum coherence for reliable detections
+
+# Novelty detection (for scoring rare/unusual objects)
+novelty:
+  method: "knn"          # kNN distance (alternatives: lof, isolation_forest, centroid)
+  k: 10                  # Number of neighbors for kNN
+  use_faiss: true        # Use FAISS acceleration if available
+
+# Gallery generation
+gallery:
+  top_n_candidates: 500   # Number of top moving object candidates to save
+  top_k_per_cluster: 10   # Number of representative subjects per behavior cluster

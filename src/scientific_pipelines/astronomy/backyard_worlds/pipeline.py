@@ -210,50 +210,89 @@ class BackyardWorldsPipeline:
             )
             logger.info(f"  {behavior}: {size} subjects")
 
-        # Step 4: Score brown dwarf candidates
+        # Step 4: Score candidates
+        scorer_type = self.config.get('scorer_type', 'brown_dwarf')
         logger.info("\n" + "=" * 80)
-        logger.info("STEP 4: Scoring Brown Dwarf Candidates")
+        if scorer_type == 'moving_object':
+            logger.info("STEP 4: Scoring Moving Object Candidates")
+        else:
+            logger.info("STEP 4: Scoring Brown Dwarf Candidates")
         logger.info("=" * 80)
 
         # Create metadata dataframe for scorer
         metadata_df = pd.DataFrame(subjects_metadata)
 
-        # Initialize scorer
-        scoring_weights = self.config.get('brown_dwarf_scoring', {}).get('weights')
-        scorer = BrownDwarfScorer(
-            embeddings=embeddings,
-            metadata=metadata_df,
-            weights=scoring_weights,
-        )
+        # Initialize scorer based on type
+        if scorer_type == 'moving_object':
+            from scientific_pipelines.core.clustering import NoveltyDetector
+
+            from .moving_object_scorer import MovingObjectScorer
+
+            # Pre-compute novelty scores for efficiency
+            novelty_config = self.config.get('novelty', {})
+            novelty_detector = NoveltyDetector(**novelty_config)
+            novelty_detector.fit(embeddings)
+
+            # Get moving object scoring config
+            mo_config = self.config.get('moving_object_scoring', {})
+            scoring_weights = mo_config.get('weights')
+            optimal_motion = mo_config.get('optimal_motion_magnitude', 0.15)
+
+            scorer = MovingObjectScorer(
+                embeddings=embeddings,
+                metadata=metadata_df,
+                weights=scoring_weights,
+                novelty_detector=novelty_detector,
+                sequence_encoder=self.sequence_encoder,
+                optimal_motion=optimal_motion,
+            )
+        else:  # 'brown_dwarf'
+            scoring_weights = self.config.get('brown_dwarf_scoring', {}).get('weights')
+            scorer = BrownDwarfScorer(
+                embeddings=embeddings,
+                metadata=metadata_df,
+                weights=scoring_weights,
+            )
 
         # Score all subjects
         ranking_df = scorer.score_subjects()
 
-        # Save brown dwarf ranking
-        ranking_csv_path = self.output_dir / "brown_dwarf_ranking.csv"
+        # Save ranking
+        ranking_csv_path = self.output_dir / f"{scorer_type}_ranking.csv"
         ranking_df.to_csv(ranking_csv_path, index=False)
-        logger.info(f"Brown dwarf rankings saved to {ranking_csv_path}")
+        logger.info(f"Rankings saved to {ranking_csv_path}")
 
         # Print top candidates
         top_n = self.config.get('gallery', {}).get('top_n_candidates', 10)
-        logger.info(f"\nTop {top_n} Brown Dwarf Candidates:")
+        candidate_type = "Moving Object" if scorer_type == 'moving_object' else "Brown Dwarf"
+        logger.info(f"\nTop {top_n} {candidate_type} Candidates:")
+
         for idx, row in ranking_df.head(top_n).iterrows():
-            logger.info(
-                f"  #{idx+1}: Subject {row['subject_id']} - "
-                f"Score: {row['total_score']:.3f} "
-                f"(motion: {row['motion_score']:.2f}, "
-                f"novelty: {row['novelty_score']:.2f})"
-            )
+            if scorer_type == 'moving_object':
+                logger.info(
+                    f"  #{idx+1}: Subject {row['subject_id']} - "
+                    f"Score: {row['total_score']:.3f} "
+                    f"(motion_mag: {row['motion_magnitude_score']:.2f}, "
+                    f"consistency: {row['motion_consistency_score']:.2f}, "
+                    f"novelty: {row['novelty_score']:.2f})"
+                )
+            else:
+                logger.info(
+                    f"  #{idx+1}: Subject {row['subject_id']} - "
+                    f"Score: {row['total_score']:.3f} "
+                    f"(motion: {row['motion_score']:.2f}, "
+                    f"novelty: {row['novelty_score']:.2f})"
+                )
 
         # Pipeline complete
         logger.info("\n" + "=" * 80)
-        logger.info("Backyard Worlds Brown Dwarf Detection Pipeline Complete!")
+        logger.info("Backyard Worlds Pipeline Complete!")
         logger.info("=" * 80)
         logger.info(f"All outputs saved to: {self.output_dir}")
         logger.info(f"  - subjects.csv: Subject metadata")
         logger.info(f"  - embeddings.parquet: Sequence embeddings")
         logger.info(f"  - subject_clusters.csv: Behavior clusters")
-        logger.info(f"  - brown_dwarf_ranking.csv: Ranked candidates")
+        logger.info(f"  - {scorer_type}_ranking.csv: Ranked candidates")
 
         return {
             'subjects_metadata': subjects_metadata,
