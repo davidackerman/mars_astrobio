@@ -17,11 +17,11 @@ download:
   limit: 5000  # Number of subjects to download (start with 5k, scale up later)
   subject_set_id: null  # Optional: specific subject set ID (null = all subjects)
 
-# DINOv3 embedding extraction
+# DINOv2 embedding extraction (DINOv3 not available in torch.hub)
 embedding:
-  model_name: "dinov3_vitb14"  # 768-dim embeddings (RECOMMENDED)
-  # Alternatives: dinov3_vits14 (384-dim), dinov3_vitl14 (1024-dim), dinov3_vitg14 (1536-dim)
-  device: "cuda"               # 'cuda' or 'cpu'
+  model_name: "dinov2_vitb14"  # 768-dim embeddings (RECOMMENDED)
+  # Alternatives: dinov2_vits14 (384-dim), dinov2_vitl14 (1024-dim), dinov2_vitg14 (1536-dim)
+  device: "cpu"                # 'cuda' or 'cpu' (using CPU since CUDA not available)
   use_half_precision: false    # Use FP16 (faster, requires CUDA)
 
 # HDBSCAN clustering (behavior categories)

@@ -1,0 +1,59 @@
+# Backyard Worlds Moving Object Detection Pipeline Configuration
+# Motion-based approach using optical flow and frame differencing
+
+pipeline_name: "backyard_worlds_motion_detection"
+output_dir: "outputs/backyard_worlds_motion"
+
+# Encoder type: "motion" for CV-based motion features, "dino" for semantic embeddings
+encoder_type: "motion"
+
+# Scorer type: "moving_object" for general movers
+scorer_type: "moving_object"
+
+# Panoptes authentication (optional - for higher API rate limits)
+panoptes_auth:
+  username: null
+  password: null
+
+# Download parameters
+download:
+  limit: 1000  # Number of subjects to download
+  subject_set_id: null
+
+# Motion-based encoding configuration
+motion_encoding:
+  use_optical_flow: true       # Enable dense optical flow computation
+  use_ai_features: false        # Enable VideoMAE (requires transformers library)
+  device: "cpu"                 # 'cuda' or 'cpu'
+
+# HDBSCAN clustering (behavior categories)
+clustering:
+  min_cluster_size: 50   # Minimum subjects per cluster
+  min_samples: 10        # Neighborhood size for core points
+  metric: "euclidean"    # Distance metric
+  cluster_selection_epsilon: 0.0
+
+# Moving object scoring weights
+moving_object_scoring:
+  weights:
+    motion_magnitude: 0.35      # Increased weight for direct motion measurement
+    motion_consistency: 0.30    # Linear vs erratic motion
+    temporal_coherence: 0.20    # Object appears in all frames
+    novelty: 0.10               # Reduced - less relevant for motion features
+    dipole_signature: 0.05      # Reduced - WISE-specific
+    artifact_penalty: -0.10     # Penalty for edge effects
+
+  optimal_motion_magnitude: 0.15
+  consistency_threshold: 0.7
+  coherence_threshold: 0.6
+
+# Novelty detection
+novelty:
+  method: "knn"
+  k: 10
+  use_faiss: true
+
+# Gallery generation
+gallery:
+  top_n_candidates: 500
+  top_k_per_cluster: 10

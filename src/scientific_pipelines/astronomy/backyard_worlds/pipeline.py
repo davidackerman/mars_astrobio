@@ -49,12 +49,19 @@ class BackyardWorldsPipeline:
             password=panoptes_auth.get('password'),
         )
 
-        # Embedding extractor
-        embedding_config = config.get('embedding', {})
-        self.embedder = DINOv3Extractor(**embedding_config)
+        # Sequence encoder (motion-based or DINO-based)
+        encoder_type = config.get('encoder_type', 'dino')  # 'dino' or 'motion'
 
-        # Sequence encoder
-        self.sequence_encoder = FlipbookSequenceEncoder(embedder=self.embedder)
+        if encoder_type == 'motion':
+            from .motion_sequence_encoder import MotionSequenceEncoder
+            motion_config = config.get('motion_encoding', {})
+            self.sequence_encoder = MotionSequenceEncoder(**motion_config)
+            logger.info("Using motion-based sequence encoder")
+        else:  # 'dino'
+            embedding_config = config.get('embedding', {})
+            self.embedder = DINOv3Extractor(**embedding_config)
+            self.sequence_encoder = FlipbookSequenceEncoder(embedder=self.embedder)
+            logger.info("Using DINO-based sequence encoder")
 
         # Clustering
         clustering_config = config.get('clustering', {})
