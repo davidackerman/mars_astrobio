@@ -72,6 +72,18 @@ def main():
         default=None,
         help='Maximum number of classifications to download (default: unlimited)',
     )
+    parser.add_argument(
+        '--since',
+        type=str,
+        default=None,
+        help='Optional ISO-8601 lower bound for created_at (inclusive)',
+    )
+    parser.add_argument(
+        '--until',
+        type=str,
+        default=None,
+        help='Optional ISO-8601 upper bound for created_at (inclusive)',
+    )
 
     parser.add_argument(
         '--username',
@@ -131,6 +143,8 @@ def main():
         classifications = downloader.download_classifications(
             subject_ids=subject_ids,
             limit=args.limit,
+            created_after=args.since,
+            created_before=args.until,
         )
 
         # Convert to DataFrame and save

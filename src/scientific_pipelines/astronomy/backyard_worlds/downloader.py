@@ -5,6 +5,7 @@ import time
 from pathlib import Path
 from typing import Dict, List, Optional
 from urllib.parse import urlparse
+from datetime import datetime
 
 import requests
 from tqdm import tqdm
@@ -267,6 +268,8 @@ class BackyardWorldsDownloader:
         subject_ids: Optional[List[int]] = None,
         workflow_id: Optional[int] = None,
         limit: Optional[int] = None,
+        created_after: Optional[str] = None,
+        created_before: Optional[str] = None,
     ) -> List[Dict]:
         """
         Download classification data for subjects.
@@ -279,6 +282,8 @@ class BackyardWorldsDownloader:
             subject_ids: Optional list of specific subject IDs to get classifications for
             workflow_id: Optional workflow ID to filter classifications
             limit: Optional maximum number of classifications to download
+            created_after: Optional ISO-8601 lower bound for created_at (inclusive)
+            created_before: Optional ISO-8601 upper bound for created_at (inclusive)
 
         Returns:
             List of classification dictionaries containing volunteer annotations
@@ -305,26 +310,55 @@ class BackyardWorldsDownloader:
 
         classifications_data = []
 
-        if subject_ids:
-            logger.info(f"Fetching classifications for {len(subject_ids)} specific subjects")
-            # Query by workflow and filter for subjects locally
+        def _parse_iso(ts: Optional[str]):
+            if not ts:
+                return None
             try:
-                query_params = {'project_id': self.BACKYARD_WORLDS_PROJECT_ID}
+                return datetime.fromisoformat(ts.replace("Z", "+00:00"))
+            except ValueError:
+                return None
+
+        created_after_dt = _parse_iso(created_after)
+        created_before_dt = _parse_iso(created_before)
+
+        def _in_date_window(created_at: Optional[str]) -> bool:
+            if not created_at or (created_after_dt is None and created_before_dt is None):
+                return True
+            created_dt = _parse_iso(created_at)
+            if created_dt is None:
+                return True
+            if created_after_dt and created_dt < created_after_dt:
+                return False
+            if created_before_dt and created_dt > created_before_dt:
+                return False
+            return True
+
+        if subject_ids:
+            logger.info(
+                "Fetching project classifications and filtering for "
+                f"{len(subject_ids)} specific subjects"
+            )
+            # Query project scope and filter locally for subject_ids
+            try:
+                query_params = {'scope': 'project', 'project_id': self.BACKYARD_WORLDS_PROJECT_ID}
                 if workflow_id:
                     query_params['workflow_id'] = workflow_id
 
                 classifications = Classification.where(**query_params)
 
-                subject_ids_set = set(subject_ids)
+                subject_ids_set = set(int(sid) for sid in subject_ids)
                 for classification in tqdm(classifications, desc="Fetching classifications"):
                     if limit and len(classifications_data) >= limit:
                         break
 
                     try:
-                        # Get subject IDs from this classification
                         classification_subject_ids = classification.raw.get('links', {}).get('subjects', [])
+                        if not classification_subject_ids:
+                            continue
 
-                        # Check if any of our target subjects are in this classification
+                        if not _in_date_window(classification.raw.get('created_at')):
+                            continue
+
                         if any(int(sid) in subject_ids_set for sid in classification_subject_ids):
                             classifications_data.append(
                                 {
@@ -363,6 +397,8 @@ class BackyardWorldsDownloader:
                     try:
                         # Extract subject IDs from links
                         subject_ids_in_classification = classification.raw.get('links', {}).get('subjects', [])
+                        if not _in_date_window(classification.raw.get('created_at')):
+                            continue
 
                         classifications_data.append(
                             {
