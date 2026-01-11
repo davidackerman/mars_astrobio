@@ -42,29 +42,33 @@ class BackyardWorldsPipeline:
         logger.info("Initializing Backyard Worlds brown dwarf detection pipeline")
 
         # Downloader
-        panoptes_auth = config.get('panoptes_auth', {})
+        panoptes_auth = config.get("panoptes_auth", {})
         self.downloader = BackyardWorldsDownloader(
             output_dir=self.output_dir / "subjects",
-            username=panoptes_auth.get('username'),
-            password=panoptes_auth.get('password'),
+            username=panoptes_auth.get("username"),
+            password=panoptes_auth.get("password"),
         )
 
         # Sequence encoder (motion-based or DINO-based)
         encoder_type = config.get('encoder_type', 'dino')  # 'dino' or 'motion'
+        self.encoder_type = encoder_type
 
         if encoder_type == 'motion':
             from .motion_sequence_encoder import MotionSequenceEncoder
             motion_config = config.get('motion_encoding', {})
+            self.motion_config = motion_config
             self.sequence_encoder = MotionSequenceEncoder(**motion_config)
             logger.info("Using motion-based sequence encoder")
         else:  # 'dino'
             embedding_config = config.get('embedding', {})
+            self.motion_config = {}
             self.embedder = DINOv3Extractor(**embedding_config)
             self.sequence_encoder = FlipbookSequenceEncoder(embedder=self.embedder)
             logger.info("Using DINO-based sequence encoder")
+            logger.info("Using DINO-based sequence encoder")
 
         # Clustering
-        clustering_config = config.get('clustering', {})
+        clustering_config = config.get("clustering", {})
         self.clusterer = HDBSCANClusterer(**clustering_config)
 
         logger.info("Backyard Worlds pipeline initialized")
@@ -73,6 +77,8 @@ class BackyardWorldsPipeline:
         self,
         skip_download: bool = False,
         skip_encoding: bool = False,
+        subjects_csv: Optional[Path] = None,
+        force_encode: bool = False,
     ):
         """
         Execute the full Backyard Worlds brown dwarf detection pipeline.
@@ -91,7 +97,7 @@ class BackyardWorldsPipeline:
             logger.info("STEP 1: Downloading Backyard Worlds Subjects")
             logger.info("=" * 80)
 
-            download_config = self.config.get('download', {})
+            download_config = self.config.get("download", {})
             subjects_metadata = self.downloader.download_subjects(**download_config)
 
             # Save subjects metadata
@@ -103,109 +109,127 @@ class BackyardWorldsPipeline:
 
         else:
             # Load existing subjects metadata
-            subjects_csv_path = self.output_dir / "subjects.csv"
+            subjects_csv_path = (
+                Path(subjects_csv) if subjects_csv is not None else self.output_dir / "subjects.csv"
+            )
             logger.info(f"Skipping download, loading metadata from {subjects_csv_path}")
+            if not Path(subjects_csv_path).exists():
+                logger.error(f"Subjects CSV not found: {subjects_csv_path}")
+                raise FileNotFoundError(f"Subjects CSV not found: {subjects_csv_path}")
             subjects_df = pd.read_csv(subjects_csv_path)
 
             # Convert frame_paths string back to list
             import ast
-            subjects_df['frame_paths'] = subjects_df['frame_paths'].apply(
+
+            subjects_df["frame_paths"] = subjects_df["frame_paths"].apply(
                 lambda x: ast.literal_eval(x) if isinstance(x, str) else x
             )
 
-            subjects_metadata = subjects_df.to_dict('records')
+            subjects_metadata = subjects_df.to_dict("records")
 
         logger.info(f"Processing {len(subjects_metadata)} subjects")
 
         # Step 2: Encode flipbook sequences
-        if not skip_encoding:
-            logger.info("\n" + "=" * 80)
-            logger.info("STEP 2: Encoding Flipbook Sequences")
-            logger.info("=" * 80)
+        embeddings_output = self.output_dir / "embeddings.parquet"
 
-            # Check for existing checkpoint
-            checkpoint_path = self.output_dir / "embeddings_checkpoint.parquet"
-            embeddings_output = self.output_dir / "embeddings.parquet"
+        # If embeddings already exist and user didn't request force re-encode,
+        # load them and skip the encoding step to save time.
+        if embeddings_output.exists() and not force_encode:
+            logger.info(f"Found existing embeddings at {embeddings_output}, loading and skipping encoding")
+            import pyarrow.parquet as pq
 
-            if checkpoint_path.exists():
-                logger.info(f"Found checkpoint at {checkpoint_path}, resuming...")
+            table = pq.read_table(embeddings_output)
+            df = table.to_pandas()
+            embeddings = np.vstack(df["embedding"].values)
+            logger.info(f"Loaded embeddings: shape={embeddings.shape}")
+        else:
+            if skip_encoding:
+                # Explicit skip requested - load embeddings (error if missing)
+                logger.info(f"Skipping encoding, loading from {embeddings_output}")
                 import pyarrow.parquet as pq
-                checkpoint_df = pq.read_table(checkpoint_path).to_pandas()
-                completed_ids = set(checkpoint_df['subject_id'].values)
-                embeddings = checkpoint_df['embedding'].tolist()
-                start_idx = len(embeddings)
-                logger.info(f"Resuming from {start_idx}/{len(subjects_metadata)} subjects")
+
+                table = pq.read_table(embeddings_output)
+                df = table.to_pandas()
+                embeddings = np.vstack(df["embedding"].values)
+                logger.info(f"Loaded embeddings: shape={embeddings.shape}")
             else:
-                completed_ids = set()
-                embeddings = []
-                start_idx = 0
+                logger.info("\n" + "=" * 80)
+                logger.info("STEP 2: Encoding Flipbook Sequences")
+                logger.info("=" * 80)
+
+                # Check for existing checkpoint
+                checkpoint_path = self.output_dir / "embeddings_checkpoint.parquet"
+                # embeddings_output already defined above
+
+                if checkpoint_path.exists():
+                    logger.info(f"Found checkpoint at {checkpoint_path}, resuming...")
+                    import pyarrow.parquet as pq
+
+                    checkpoint_df = pq.read_table(checkpoint_path).to_pandas()
+                    completed_ids = set(checkpoint_df["subject_id"].values)
+                    embeddings = checkpoint_df["embedding"].tolist()
+                    start_idx = len(embeddings)
+                    logger.info(f"Resuming from {start_idx}/{len(subjects_metadata)} subjects")
+                else:
+                    completed_ids = set()
+                    embeddings = []
+                    start_idx = 0
 
             # Encode with checkpointing every 100 subjects
             checkpoint_interval = 100
-            for idx, subject in enumerate(tqdm(subjects_metadata, desc="Encoding flipbooks", initial=start_idx)):
+            for idx, subject in enumerate(
+                tqdm(subjects_metadata, desc="Encoding flipbooks", initial=start_idx)
+            ):
                 # Skip already completed subjects
-                if subject['subject_id'] in completed_ids:
+                if subject["subject_id"] in completed_ids:
                     continue
 
-                frame_paths = [Path(p) for p in subject['frame_paths']]
+                frame_paths = [Path(p) for p in subject["frame_paths"]]
 
                 try:
                     sequence_embedding = self.sequence_encoder.encode_sequence(frame_paths)
                     embeddings.append(sequence_embedding)
                 except Exception as e:
-                    logger.warning(
-                        f"Failed to encode subject {subject['subject_id']}: {e}"
-                    )
+                    logger.warning(f"Failed to encode subject {subject['subject_id']}: {e}")
                     # Add zero embedding as placeholder
-                    embeddings.append(
-                        self.sequence_encoder.sequence_embedding_dim * [0.0]
-                    )
+                    embeddings.append(self.sequence_encoder.sequence_embedding_dim * [0.0])
 
                 # Save checkpoint periodically
                 if (idx + 1) % checkpoint_interval == 0 and idx >= start_idx:
-                    checkpoint_df = pd.DataFrame({
-                        'subject_id': [s['subject_id'] for s in subjects_metadata[:idx+1]],
-                        'embedding': embeddings,
-                        'embedding_dim': len(embeddings[0]) if embeddings else 0,
-                    })
+                    checkpoint_df = pd.DataFrame(
+                        {
+                            "subject_id": [s["subject_id"] for s in subjects_metadata[: idx + 1]],
+                            "embedding": embeddings,
+                            "embedding_dim": len(embeddings[0]) if embeddings else 0,
+                        }
+                    )
                     checkpoint_df.to_parquet(checkpoint_path, index=False)
-                    logger.info(f"Checkpoint saved: {idx+1}/{len(subjects_metadata)} subjects encoded")
+                    logger.info(
+                        f"Checkpoint saved: {idx+1}/{len(subjects_metadata)} subjects encoded"
+                    )
 
             embeddings = np.array(embeddings)
 
             # Save final embeddings
             embeddings_df = pd.DataFrame(
                 {
-                    'subject_id': [s['subject_id'] for s in subjects_metadata],
-                    'embedding': list(embeddings),
-                    'embedding_dim': embeddings.shape[1],
+                    "subject_id": [s["subject_id"] for s in subjects_metadata],
+                    "embedding": list(embeddings),
+                    "embedding_dim": embeddings.shape[1],
                 }
             )
 
             embeddings_df.to_parquet(embeddings_output, index=False)
             logger.info(f"Embeddings saved to {embeddings_output}")
             logger.info(
-                f"Encoded embeddings: shape={embeddings.shape}, "
-                f"dim={embeddings.shape[1]}"
+                f"Encoded embeddings: shape={embeddings.shape}, " f"dim={embeddings.shape[1]}"
             )
 
             # Remove checkpoint file after successful completion
             if checkpoint_path.exists():
                 checkpoint_path.unlink()
                 logger.info("Checkpoint file removed after successful completion")
-
-        else:
-            # Load existing embeddings
-            embeddings_output = self.output_dir / "embeddings.parquet"
-            logger.info(f"Skipping encoding, loading from {embeddings_output}")
-
-            import pyarrow.parquet as pq
-
-            table = pq.read_table(embeddings_output)
-            df = table.to_pandas()
-            embeddings = np.vstack(df['embedding'].values)
-
-            logger.info(f"Loaded embeddings: shape={embeddings.shape}")
+        
 
         # Step 3: Cluster subjects by behavior
         logger.info("\n" + "=" * 80)
@@ -217,10 +241,10 @@ class BackyardWorldsPipeline:
         # Save cluster results
         clusters_df = pd.DataFrame(
             {
-                'subject_id': [s['subject_id'] for s in subjects_metadata],
-                'cluster_id': cluster_results['labels'],
-                'cluster_probability': cluster_results['probabilities'],
-                'outlier_score': cluster_results['outlier_scores'],
+                "subject_id": [s["subject_id"] for s in subjects_metadata],
+                "cluster_id": cluster_results["labels"],
+                "cluster_probability": cluster_results["probabilities"],
+                "outlier_score": cluster_results["outlier_scores"],
             }
         )
 
@@ -243,10 +267,8 @@ class BackyardWorldsPipeline:
             "Artifacts",
         ]
 
-        for cluster_id in sorted(
-            [k for k in cluster_results['cluster_sizes'].keys() if k != -1]
-        ):
-            size = cluster_results['cluster_sizes'][cluster_id]
+        for cluster_id in sorted([k for k in cluster_results["cluster_sizes"].keys() if k != -1]):
+            size = cluster_results["cluster_sizes"][cluster_id]
             behavior = (
                 behavior_names[cluster_id]
                 if cluster_id < len(behavior_names)
@@ -255,9 +277,9 @@ class BackyardWorldsPipeline:
             logger.info(f"  {behavior}: {size} subjects")
 
         # Step 4: Score candidates
-        scorer_type = self.config.get('scorer_type', 'brown_dwarf')
+        scorer_type = self.config.get("scorer_type", "brown_dwarf")
         logger.info("\n" + "=" * 80)
-        if scorer_type == 'moving_object':
+        if scorer_type == "moving_object":
             logger.info("STEP 4: Scoring Moving Object Candidates")
         else:
             logger.info("STEP 4: Scoring Brown Dwarf Candidates")
@@ -267,20 +289,20 @@ class BackyardWorldsPipeline:
         metadata_df = pd.DataFrame(subjects_metadata)
 
         # Initialize scorer based on type
-        if scorer_type == 'moving_object':
+        if scorer_type == "moving_object":
             from scientific_pipelines.core.clustering import NoveltyDetector
 
             from .moving_object_scorer import MovingObjectScorer
 
             # Pre-compute novelty scores for efficiency
-            novelty_config = self.config.get('novelty', {})
+            novelty_config = self.config.get("novelty", {})
             novelty_detector = NoveltyDetector(**novelty_config)
             novelty_detector.fit(embeddings)
 
             # Get moving object scoring config
-            mo_config = self.config.get('moving_object_scoring', {})
-            scoring_weights = mo_config.get('weights')
-            optimal_motion = mo_config.get('optimal_motion_magnitude', 0.15)
+            mo_config = self.config.get("moving_object_scoring", {})
+            scoring_weights = mo_config.get("weights")
+            optimal_motion = mo_config.get("optimal_motion_magnitude", 0.15)
 
             scorer = MovingObjectScorer(
                 embeddings=embeddings,
@@ -289,12 +311,12 @@ class BackyardWorldsPipeline:
                 novelty_detector=novelty_detector,
                 sequence_encoder=self.sequence_encoder,
                 optimal_motion=optimal_motion,
-                encoder_type=encoder_type,
-                motion_feature_config=motion_config if encoder_type == 'motion' else {},
-                blinker_classifier_config=self.config.get('blinker_classifier', {}),
+                encoder_type=self.encoder_type,
+                motion_feature_config=self.motion_config if self.encoder_type == "motion" else {},
+                blinker_classifier_config=self.config.get("blinker_classifier", {}),
             )
         else:  # 'brown_dwarf'
-            scoring_weights = self.config.get('brown_dwarf_scoring', {}).get('weights')
+            scoring_weights = self.config.get("brown_dwarf_scoring", {}).get("weights")
             scorer = BrownDwarfScorer(
                 embeddings=embeddings,
                 metadata=metadata_df,
@@ -310,12 +332,12 @@ class BackyardWorldsPipeline:
         logger.info(f"Rankings saved to {ranking_csv_path}")
 
         # Print top candidates
-        top_n = self.config.get('gallery', {}).get('top_n_candidates', 10)
-        candidate_type = "Moving Object" if scorer_type == 'moving_object' else "Brown Dwarf"
+        top_n = self.config.get("gallery", {}).get("top_n_candidates", 10)
+        candidate_type = "Moving Object" if scorer_type == "moving_object" else "Brown Dwarf"
         logger.info(f"\nTop {top_n} {candidate_type} Candidates:")
 
         for idx, row in ranking_df.head(top_n).iterrows():
-            if scorer_type == 'moving_object':
+            if scorer_type == "moving_object":
                 logger.info(
                     f"  #{idx+1}: Subject {row['subject_id']} - "
                     f"Score: {row['total_score']:.3f} "
@@ -342,8 +364,8 @@ class BackyardWorldsPipeline:
         logger.info(f"  - {scorer_type}_ranking.csv: Ranked candidates")
 
         return {
-            'subjects_metadata': subjects_metadata,
-            'embeddings': embeddings,
-            'cluster_results': cluster_results,
-            'ranking_df': ranking_df,
+            "subjects_metadata": subjects_metadata,
+            "embeddings": embeddings,
+            "cluster_results": cluster_results,
+            "ranking_df": ranking_df,
         }

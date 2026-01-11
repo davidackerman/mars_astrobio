@@ -31,40 +31,82 @@ def _read_frames_from_paths(frame_paths: List[Path]) -> List[np.ndarray]:
     return frames
 
 
-def _compute_motion_circle(frames: List[np.ndarray]) -> Optional[Tuple[Tuple[int, int], int]]:
+def _compute_motion_circles(
+    frames: List[np.ndarray],
+    max_circles: int,
+    min_blob_area: int,
+    threshold_quantile: float,
+    suppress_bright_percentile: float,
+    bright_component_percentile: float,
+    min_radius: int,
+    max_radius: int,
+    min_peak_value: int,
+) -> List[Tuple[Tuple[int, int], int]]:
     gray_frames = [cv2.cvtColor(f, cv2.COLOR_BGR2GRAY) for f in frames]
     heatmap = np.zeros_like(gray_frames[0], dtype=np.float32)
     for i in range(len(gray_frames) - 1):
         diff = cv2.absdiff(gray_frames[i], gray_frames[i + 1]).astype(np.float32)
         heatmap += diff
 
+    nonzero = heatmap[heatmap > 0]
+    if nonzero.size == 0:
+        return []
+
+    if suppress_bright_percentile < 100.0:
+        clip_value = float(np.percentile(nonzero, suppress_bright_percentile))
+        heatmap = np.minimum(heatmap, clip_value)
+
     heatmap_u8 = np.clip(heatmap / (heatmap.max() + 1e-6) * 255.0, 0, 255).astype(
         np.uint8
     )
-    _, binary = cv2.threshold(
-        heatmap_u8, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU
-    )
+    if heatmap_u8.max() < min_peak_value:
+        return []
+
+    nonzero_u8 = heatmap_u8[heatmap_u8 > 0]
+    if nonzero_u8.size == 0:
+        return []
+
+    thresh_val = float(np.quantile(nonzero_u8, threshold_quantile))
+    binary = (heatmap_u8 >= thresh_val).astype(np.uint8) * 255
 
     num_labels, labels, stats, centroids = cv2.connectedComponentsWithStats(
         binary, connectivity=8
     )
-    if num_labels > 1:
-        # Skip background (label 0); choose largest component.
-        areas = stats[1:, cv2.CC_STAT_AREA]
-        max_idx = int(np.argmax(areas)) + 1
-        area = stats[max_idx, cv2.CC_STAT_AREA]
-        cx, cy = centroids[max_idx]
-        radius = int(np.clip(np.sqrt(area), 6, 24))
-        return (int(cx), int(cy)), radius
 
-    # Fallback: pick max-motion pixel.
-    y, x = np.unravel_index(int(np.argmax(heatmap_u8)), heatmap_u8.shape)
-    return (int(x), int(y)), 10
+    bright_clip = float(
+        np.percentile(nonzero_u8, bright_component_percentile)
+    )
+
+    candidates = []
+    for label in range(1, num_labels):
+        area = int(stats[label, cv2.CC_STAT_AREA])
+        if area < min_blob_area:
+            continue
+        mask = labels == label
+        mean_intensity = float(heatmap_u8[mask].mean())
+        if mean_intensity > bright_clip:
+            continue
+        cx, cy = centroids[label]
+        radius = int(np.clip(np.sqrt(area), min_radius, max_radius))
+        candidates.append((mean_intensity, (int(cx), int(cy)), radius))
+
+    if not candidates:
+        return []
+
+    candidates.sort(key=lambda item: item[0], reverse=True)
+    circles = [
+        (center, radius) for _, center, radius in candidates[:max_circles]
+    ]
+    return circles
 
 
-def _draw_circle(frames: List[np.ndarray], center: Tuple[int, int], radius: int) -> None:
+def _draw_circles(
+    frames: List[np.ndarray],
+    circles: List[Tuple[Tuple[int, int], int]],
+) -> None:
     for frame in frames:
-        cv2.circle(frame, center, radius, (0, 255, 255), 2)
+        for center, radius in circles:
+            cv2.circle(frame, center, radius, (0, 255, 255), 2)
 
 
 def _write_video(frames: List[np.ndarray], out_path: Path, fps: int, loop: int) -> None:
@@ -149,6 +191,14 @@ def main() -> None:
     parser.add_argument("--top-n", type=int, default=100)
     parser.add_argument("--fps", type=int, default=2)
     parser.add_argument("--loop", type=int, default=4)
+    parser.add_argument("--max-circles", type=int, default=3)
+    parser.add_argument("--min-blob-area", type=int, default=12)
+    parser.add_argument("--threshold-quantile", type=float, default=0.88)
+    parser.add_argument("--suppress-bright-percentile", type=float, default=99.7)
+    parser.add_argument("--bright-component-percentile", type=float, default=99.5)
+    parser.add_argument("--min-radius", type=int, default=6)
+    parser.add_argument("--max-radius", type=int, default=24)
+    parser.add_argument("--min-peak-value", type=int, default=6)
     parser.add_argument(
         "--format",
         choices=["mp4", "gif"],
@@ -173,10 +223,19 @@ def main() -> None:
         if not frames:
             continue
 
-        circle = _compute_motion_circle(frames)
-        if circle is not None:
-            center, radius = circle
-            _draw_circle(frames, center, radius)
+        circles = _compute_motion_circles(
+            frames,
+            max_circles=args.max_circles,
+            min_blob_area=args.min_blob_area,
+            threshold_quantile=args.threshold_quantile,
+            suppress_bright_percentile=args.suppress_bright_percentile,
+            bright_component_percentile=args.bright_component_percentile,
+            min_radius=args.min_radius,
+            max_radius=args.max_radius,
+            min_peak_value=args.min_peak_value,
+        )
+        if circles:
+            _draw_circles(frames, circles)
 
         if args.format == "gif":
             out_path = args.out_dir / f"subject_{subject_id}.gif"

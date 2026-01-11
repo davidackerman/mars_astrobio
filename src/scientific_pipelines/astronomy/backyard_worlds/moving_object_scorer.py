@@ -463,6 +463,15 @@ class MovingObjectScorer:
         if mask.sum() < min_samples:
             return
 
+        # Ensure there are at least two classes present before training
+        unique_classes = np.unique(y[mask])
+        if unique_classes.size < 2:
+            logger.warning(
+                "Blinker classifier: insufficient label variety (classes=%s), skipping training",
+                unique_classes.tolist(),
+            )
+            return
+
         X = self.embeddings[mask]
         y = y[mask]
 

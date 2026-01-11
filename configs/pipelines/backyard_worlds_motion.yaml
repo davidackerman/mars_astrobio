@@ -4,6 +4,11 @@
 pipeline_name: "backyard_worlds_motion_detection"
 output_dir: "outputs/backyard_worlds_motion"
 
+# If you have already downloaded subjects and metadata, set these to point
+# to the existing files to avoid copying or re-downloading.
+subjects_csv: "data/subjects_metadata.csv"
+subjects_dir: "data/backyard_worlds"
+
 # Encoder type: "motion" for CV-based motion features, "dino" for semantic embeddings
 encoder_type: "motion"
 
@@ -43,8 +48,13 @@ moving_object_scoring:
     novelty: 0.10               # Reduced - less relevant for motion features
     dipole_signature: 0.05      # Reduced - WISE-specific
     artifact_penalty: -0.10     # Penalty for edge effects
-    blinker_penalty: -0.25      # Penalize transient/blinking detections
-    blinker_classifier_penalty: -0.20  # AI+CV blinker probability penalty
+    blinker_penalty: 0.0        # Disabled to avoid blanket blinker labeling
+    blinker_classifier_penalty: 0.0  # Disabled until detector is tuned
+
+  # If blob persistence is low across the dataset (many zeros),
+  # the blinker penalties can dominate. Set these to 0 to disable
+  # automatic blanket penalization while you tune the detector.
+    
 
   optimal_motion_magnitude: 0.15
   consistency_threshold: 0.7
