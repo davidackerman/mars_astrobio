@@ -1,0 +1,80 @@
+{
+  "subject_27855980": {
+    "notes": "Manual dipole center at (222, 139)",
+    "mover_circles": [],
+    "dipole_circles": [
+      [
+        182,
+        99,
+        80,
+        80
+      ]
+    ],
+    "artifact_circles": []
+  },
+  "subject_5566284": {
+    "notes": "Manual dipole center at (434, 295)",
+    "mover_circles": [],
+    "dipole_circles": [
+      [
+        394,
+        255,
+        80,
+        80
+      ]
+    ],
+    "artifact_circles": []
+  },
+  "subject_4658409": {
+    "notes": "Manual mover center at (60, 168)",
+    "mover_circles": [
+      [
+        20,
+        128,
+        80,
+        80
+      ]
+    ],
+    "dipole_circles": [],
+    "artifact_circles": []
+  },
+  "subject_5179360": {
+    "notes": "Manual mover at (156, 169) and dipoles at (237, 61), (119, 464)",
+    "mover_circles": [
+      [
+        116,
+        129,
+        80,
+        80
+      ]
+    ],
+    "dipole_circles": [
+      [
+        197,
+        21,
+        80,
+        80
+      ],
+      [
+        79,
+        424,
+        80,
+        80
+      ]
+    ],
+    "artifact_circles": []
+  },
+  "subject_28023282": {
+    "notes": "Manual dipole center at (465, 458)",
+    "mover_circles": [],
+    "dipole_circles": [
+      [
+        425,
+        418,
+        80,
+        80
+      ]
+    ],
+    "artifact_circles": []
+  }
+}
