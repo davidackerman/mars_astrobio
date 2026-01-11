@@ -11,6 +11,7 @@ from pathlib import Path
 from typing import Dict, List, Tuple
 
 import cv2
+import numpy as np
 
 
 def _read_frames(frame_paths: List[Path]) -> List:
@@ -75,6 +76,18 @@ def _load_subject_frames(subjects_csv: Path) -> Dict[str, List[Path]]:
                 continue
             subject_frames[str(subject_id)] = [Path(p) for p in paths]
     return subject_frames
+
+
+def _load_subject_ids_from_csv(subjects_csv: Path) -> List[str]:
+    resolved_csv = _resolve_subjects_csv(subjects_csv)
+    subject_ids: List[str] = []
+    with resolved_csv.open(newline="") as handle:
+        reader = csv.DictReader(handle)
+        for row in reader:
+            subject_id = row.get("subject_id")
+            if subject_id:
+                subject_ids.append(str(subject_id))
+    return subject_ids
 
 
 def _load_detections(path: Path) -> Dict[str, List[Tuple[int, float, float, str]]]:
@@ -160,17 +173,42 @@ def _draw_tracklets(
             continue
         _, x_start, y_start = points_sorted[0]
         _, x_end, y_end = points_sorted[-1]
-        thickness = max(2, radius * 2)
+        dx = x_end - x_start
+        dy = y_end - y_start
+        length = float(np.hypot(dx, dy))
+        if length < 1e-3:
+            continue
+        ux, uy = dx / length, dy / length
+        px, py = -uy, ux
+        half = length / 2.0
+        angle = float(np.degrees(np.arctan2(dy, dx)))
+        center_x = (x_start + x_end) / 2.0
+        center_y = (y_start + y_end) / 2.0
         for frame in frames:
-            cv2.line(
+            cv2.ellipse(
                 frame,
-                (int(x_start), int(y_start)),
-                (int(x_end), int(y_end)),
+                (int(center_x), int(center_y)),
+                (int(half), int(radius)),
+                angle,
+                0,
+                360,
                 color,
-                thickness,
+                line_width,
             )
-            cv2.circle(frame, (int(x_start), int(y_start)), radius, color, -1)
-            cv2.circle(frame, (int(x_end), int(y_end)), radius, color, -1)
+            cap_x1 = x_start + ux * radius
+            cap_y1 = y_start + uy * radius
+            cap_x2 = x_end - ux * radius
+            cap_y2 = y_end - uy * radius
+            p1x = cap_x1 + px * radius
+            p1y = cap_y1 + py * radius
+            p2x = cap_x1 - px * radius
+            p2y = cap_y1 - py * radius
+            p3x = cap_x2 + px * radius
+            p3y = cap_y2 + py * radius
+            p4x = cap_x2 - px * radius
+            p4y = cap_y2 - py * radius
+            cv2.line(frame, (int(p1x), int(p1y)), (int(p3x), int(p3y)), color, line_width)
+            cv2.line(frame, (int(p2x), int(p2y)), (int(p4x), int(p4y)), color, line_width)
         if draw_points:
             for diff_index, x, y in points_sorted:
                 frame_idx = min(diff_index + 1, len(frames) - 1)
@@ -238,17 +276,23 @@ def main() -> None:
     parser.add_argument("--track-radius", type=int, default=8)
     parser.add_argument("--track-line-width", type=int, default=2)
     parser.add_argument("--tracklet-points", action="store_true")
-    parser.add_argument("--dipole-size", type=int, default=10)
+    parser.add_argument("--dipole-size", type=int, default=14)
     parser.add_argument("--no-tracklets", action="store_true")
     args = parser.parse_args()
 
     subject_frames = _load_subject_frames(args.subjects_csv)
+    subject_id_list = _load_subject_ids_from_csv(args.subjects_csv)
     detections = _load_detections(args.detections_csv)
     tracklets = _load_tracklets(args.tracklets_csv)
     dipoles = _load_dipoles(args.dipoles_csv)
     args.out_dir.mkdir(parents=True, exist_ok=True)
 
-    subject_ids = list(detections.keys())[: args.top_n]
+    eligible_subjects = {
+        sid
+        for sid in subject_id_list
+        if tracklets.get(sid) or dipoles.get(sid)
+    }
+    subject_ids = [sid for sid in subject_id_list if sid in eligible_subjects][: args.top_n]
     for subject_id in subject_ids:
         frame_paths = subject_frames.get(subject_id)
         if frame_paths is None:
@@ -277,7 +321,7 @@ def main() -> None:
             frames,
             dipoles.get(subject_id, []),
             size=args.dipole_size,
-            color=(200, 200, 200),
+            color=(0, 0, 255),
         )
 
         out_path = args.out_dir / f"subject_{subject_id}.gif"
