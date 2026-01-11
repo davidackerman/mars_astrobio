@@ -497,7 +497,7 @@ def main() -> None:
     parser.add_argument("--dipole-tracklet-max-angle", type=float, default=25.0)
     parser.add_argument("--dipole-tracklet-max-residual", type=float, default=6.0)
     parser.add_argument("--dipole-match-radius", type=float, default=6.0)
-    parser.add_argument("--workers", type=int, default=1)
+    parser.add_argument("--workers", type=int, default=8)
     parser.add_argument(
         "--use-dipole-centers",
         action="store_true",
