@@ -287,13 +287,32 @@ def main() -> None:
     dipoles = _load_dipoles(args.dipoles_csv)
     args.out_dir.mkdir(parents=True, exist_ok=True)
 
-    eligible_subjects = {
+    eligible_subjects = [
         sid
         for sid in subject_id_list
         if tracklets.get(sid) or dipoles.get(sid)
-    }
-    subject_ids = [sid for sid in subject_id_list if sid in eligible_subjects][: args.top_n]
-    for subject_id in subject_ids:
+    ]
+
+    def _max_tracklet_len(sid: str) -> float:
+        subject_tracklets = tracklets.get(sid, {})
+        if not subject_tracklets:
+            return 0.0
+        max_len = 0.0
+        for points in subject_tracklets.values():
+            points_sorted = sorted(points, key=lambda p: p[0])
+            if len(points_sorted) < 2:
+                continue
+            _, x0, y0 = points_sorted[0]
+            _, x1, y1 = points_sorted[-1]
+            max_len = max(max_len, float(np.hypot(x1 - x0, y1 - y0)))
+        return max_len
+
+    eligible_subjects.sort(
+        key=lambda sid: (_max_tracklet_len(sid), sid),
+        reverse=True,
+    )
+    subject_ids = eligible_subjects[: args.top_n]
+    for idx, subject_id in enumerate(subject_ids, start=1):
         frame_paths = subject_frames.get(subject_id)
         if frame_paths is None:
             subject_dir = args.subjects_dir / f"subject_{subject_id}"
@@ -324,7 +343,7 @@ def main() -> None:
             color=(0, 0, 255),
         )
 
-        out_path = args.out_dir / f"subject_{subject_id}.gif"
+        out_path = args.out_dir / f"{idx:03d}_subject_{subject_id}.gif"
         _write_gif(frames, out_path, args.fps, args.loop)
 
 
