@@ -34,11 +34,13 @@ class MotionSequenceEncoder:
         use_optical_flow: bool = True,
         use_ai_features: bool = False,
         device: str = "cpu",
+        ai_input: str = "rgb",
     ):
         self.feature_extractor = MotionFeatureExtractor(
             use_optical_flow=use_optical_flow,
             use_ai_features=use_ai_features,
             device=device,
+            ai_input=ai_input,
         )
 
         self.sequence_embedding_dim = self.feature_extractor.get_feature_dim()

@@ -39,6 +39,8 @@ class MovingObjectScorer:
         'novelty': 0.15,
         'dipole_signature': 0.10,
         'artifact_penalty': -0.10,
+        'blinker_penalty': -0.15,
+        'blinker_classifier_penalty': -0.20,
     }
 
     def __init__(
@@ -49,6 +51,9 @@ class MovingObjectScorer:
         novelty_detector=None,
         sequence_encoder=None,
         optimal_motion: float = 0.15,
+        encoder_type: str = "dino",
+        motion_feature_config: Optional[Dict[str, bool]] = None,
+        blinker_classifier_config: Optional[Dict[str, float]] = None,
     ):
         self.embeddings = embeddings
         self.metadata = metadata
@@ -56,12 +61,43 @@ class MovingObjectScorer:
         self.novelty_detector = novelty_detector
         self.sequence_encoder = sequence_encoder
         self.optimal_motion = optimal_motion
+        self.encoder_type = encoder_type
+        self.motion_feature_config = motion_feature_config or {}
+        self.blinker_classifier_config = blinker_classifier_config or {}
+
+        # Pre-compute embedding statistics for normalized scoring
+        embed_dim_base = self.embeddings.shape[1] // 3
+        mean_frames = self.embeddings[:, :embed_dim_base]
+        std_frames = self.embeddings[:, embed_dim_base : 2 * embed_dim_base]
+        mean_deltas = self.embeddings[:, 2 * embed_dim_base :]
+
+        self._delta_magnitudes = np.linalg.norm(mean_deltas, axis=1)
+        self._std_magnitudes = np.linalg.norm(std_frames, axis=1)
+        self._mean_magnitudes = np.linalg.norm(mean_frames, axis=1)
+        self._mean_variances = np.var(mean_frames, axis=1)
+
+        self._delta_norm, self._delta_low, self._delta_high = self._robust_minmax(
+            self._delta_magnitudes
+        )
+        self._std_norm, _, _ = self._robust_minmax(self._std_magnitudes)
+        self._mean_norm, _, _ = self._robust_minmax(self._mean_magnitudes)
+        self._var_norm, _, _ = self._robust_minmax(self._mean_variances)
+
+        self._optimal_motion_norm = self._normalize_value(
+            self.optimal_motion, self._delta_low, self._delta_high
+        )
+
+        # Pre-compute blinker classifier scores if configured
+        self._blinker_classifier_scores = None
+        self._fit_blinker_classifier()
 
         # Pre-compute novelty scores if detector provided
         self.novelty_scores = None
+        self._novelty_norm = None
         if self.novelty_detector is not None:
             logger.info("Pre-computing novelty scores for all subjects")
             self.novelty_scores = self.novelty_detector.score(self.embeddings)
+            self._novelty_norm, _, _ = self._robust_minmax(self.novelty_scores)
 
         logger.info(
             f"MovingObjectScorer initialized with {len(embeddings)} subjects"
@@ -90,12 +126,17 @@ class MovingObjectScorer:
             subject_meta = self.metadata.iloc[idx]
 
             # Compute component scores
-            motion_magnitude_score = self._score_motion_magnitude(embedding)
-            motion_consistency_score = self._score_motion_consistency(embedding)
-            temporal_coherence_score = self._score_temporal_coherence(embedding)
+            motion_magnitude_score = self._score_motion_magnitude(idx)
+            motion_consistency_score = self._score_motion_consistency(idx)
+            temporal_coherence_score = self._score_temporal_coherence(idx)
             novelty_score = self._score_novelty(idx)
-            dipole_signature_score = self._score_dipole_signature(embedding)
+            dipole_signature_score = self._score_dipole_signature(idx)
             artifact_penalty = self._score_artifacts(subject_meta)
+            blinker_penalty = self._score_blinker_penalty(idx)
+            blinker_classifier_score = self._score_blinker_classifier_penalty(idx)
+            blinker_artifact_label = self._label_blinker_artifact(
+                artifact_penalty, blinker_penalty, blinker_classifier_score
+            )
 
             # Weighted total
             total_score = (
@@ -105,6 +146,8 @@ class MovingObjectScorer:
                 + self.weights['novelty'] * novelty_score
                 + self.weights['dipole_signature'] * dipole_signature_score
                 + self.weights['artifact_penalty'] * artifact_penalty
+                + self.weights['blinker_penalty'] * blinker_penalty
+                + self.weights['blinker_classifier_penalty'] * blinker_classifier_score
             )
 
             scores.append(
@@ -117,11 +160,16 @@ class MovingObjectScorer:
                     'novelty_score': novelty_score,
                     'dipole_signature_score': dipole_signature_score,
                     'artifact_penalty': artifact_penalty,
+                    'blinker_penalty': blinker_penalty,
+                    'blinker_classifier_score': blinker_classifier_score,
+                    'blinker_artifact_label': blinker_artifact_label,
                 }
             )
 
         # Create dataframe and sort by score
         scores_df = pd.DataFrame(scores).sort_values('total_score', ascending=False)
+
+        self._log_score_stats(scores_df)
 
         logger.info(
             f"Scoring complete. Top score: {scores_df.iloc[0]['total_score']:.3f}"
@@ -133,7 +181,31 @@ class MovingObjectScorer:
 
         return scores_df
 
-    def _score_motion_magnitude(self, sequence_embedding: np.ndarray) -> float:
+    def _log_score_stats(self, scores_df: pd.DataFrame) -> None:
+        """Log basic distribution stats for score components."""
+        components = [
+            'motion_magnitude_score',
+            'motion_consistency_score',
+            'temporal_coherence_score',
+            'novelty_score',
+            'dipole_signature_score',
+            'artifact_penalty',
+            'blinker_penalty',
+            'blinker_classifier_score',
+            'blinker_artifact_label',
+            'total_score',
+        ]
+        logger.info("Score component stats (min/median/p95/max):")
+        for name in components:
+            values = scores_df[name].to_numpy(dtype=float)
+            p50 = float(np.median(values))
+            p95 = float(np.percentile(values, 95))
+            logger.info(
+                f"  {name}: min={values.min():.4f}, "
+                f"p50={p50:.4f}, p95={p95:.4f}, max={values.max():.4f}"
+            )
+
+    def _score_motion_magnitude(self, idx: int) -> float:
         """
         Score based on motion magnitude.
 
@@ -141,25 +213,21 @@ class MovingObjectScorer:
         moderate motion (0.10-0.25 range) using a sigmoid function.
 
         Args:
-            sequence_embedding: Sequence embedding (3*D,)
+            idx: Index of subject in embeddings array
 
         Returns:
             Motion magnitude score in [0, 1]
         """
-        # Extract mean_delta component (motion)
-        embed_dim_base = len(sequence_embedding) // 3
-        mean_delta = sequence_embedding[2 * embed_dim_base :]
-
-        # Compute motion magnitude (L2 norm)
-        delta_magnitude = np.linalg.norm(mean_delta)
-
         # Score: sigmoid centered on optimal motion
         # Higher scores for motion near optimal_motion
-        score = 1.0 / (1.0 + np.exp(-10 * (delta_magnitude - self.optimal_motion)))
+        delta_norm = self._delta_norm[idx]
+        score = 1.0 / (
+            1.0 + np.exp(-10 * (delta_norm - self._optimal_motion_norm))
+        )
 
-        return float(np.clip(score, 0, 1))
+        return self._clip01(score)
 
-    def _score_motion_consistency(self, sequence_embedding: np.ndarray) -> float:
+    def _score_motion_consistency(self, idx: int) -> float:
         """
         Score based on motion consistency.
 
@@ -170,25 +238,17 @@ class MovingObjectScorer:
         consistently in all frames with similar appearance.
 
         Args:
-            sequence_embedding: Sequence embedding (3*D,)
+            idx: Index of subject in embeddings array
 
         Returns:
             Consistency score in [0, 1]
         """
-        # Extract std_frame component (appearance variability)
-        embed_dim_base = len(sequence_embedding) // 3
-        std_frame = sequence_embedding[embed_dim_base : 2 * embed_dim_base]
+        # Score: low std -> high consistency (normalized, avoids saturation)
+        consistency_score = 1.0 - self._std_norm[idx]
 
-        # Compute variability magnitude
-        std_magnitude = np.linalg.norm(std_frame)
+        return self._clip01(consistency_score)
 
-        # Score: low std -> high consistency
-        # Use tanh to map [0, inf) -> [0, 1]
-        consistency_score = 1.0 - np.tanh(std_magnitude / 10.0)
-
-        return float(np.clip(consistency_score, 0, 1))
-
-    def _score_temporal_coherence(self, sequence_embedding: np.ndarray) -> float:
+    def _score_temporal_coherence(self, idx: int) -> float:
         """
         Score based on temporal coherence.
 
@@ -200,23 +260,15 @@ class MovingObjectScorer:
         in all frames.
 
         Args:
-            sequence_embedding: Sequence embedding (3*D,)
+            idx: Index of subject in embeddings array
 
         Returns:
             Coherence score in [0, 1]
         """
-        # Extract std_frame component
-        embed_dim_base = len(sequence_embedding) // 3
-        std_frame = sequence_embedding[embed_dim_base : 2 * embed_dim_base]
+        # Score: low std -> high coherence (quadratic penalty)
+        coherence_score = 1.0 - (self._std_norm[idx] ** 2)
 
-        # Compute variability magnitude
-        std_magnitude = np.linalg.norm(std_frame)
-
-        # Score: low std -> high coherence
-        # Slightly different scaling than consistency
-        coherence_score = np.exp(-(std_magnitude ** 2) / (2 * 5.0 ** 2))
-
-        return float(np.clip(coherence_score, 0, 1))
+        return self._clip01(coherence_score)
 
     def _score_novelty(self, idx: int) -> float:
         """
@@ -232,10 +284,8 @@ class MovingObjectScorer:
         Returns:
             Novelty score in [0, 1]
         """
-        if self.novelty_scores is not None:
-            # Use pre-computed scores
-            score = self.novelty_scores[idx]
-            return float(np.clip(score, 0, 1))
+        if self._novelty_norm is not None:
+            return float(self._novelty_norm[idx])
 
         # No novelty detector - return neutral score
         logger.debug(
@@ -243,7 +293,7 @@ class MovingObjectScorer:
         )
         return 0.5
 
-    def _score_dipole_signature(self, sequence_embedding: np.ndarray) -> float:
+    def _score_dipole_signature(self, idx: int) -> float:
         """
         Score based on dipole signature.
 
@@ -263,26 +313,18 @@ class MovingObjectScorer:
         Returns:
             Dipole score in [0, 1]
         """
-        # Extract mean_frame component (appearance)
-        embed_dim_base = len(sequence_embedding) // 3
-        mean_frame = sequence_embedding[:embed_dim_base]
+        # Heuristic: moderate magnitude + some variance suggests structure.
+        mean_norm = self._mean_norm[idx]
+        var_norm = self._var_norm[idx]
 
-        # Compute statistics
-        mean_magnitude = np.linalg.norm(mean_frame)
-        mean_variance = np.var(mean_frame)
-
-        # Heuristic: moderate magnitude + some variance suggests structure
-        # Score based on magnitude being in reasonable range
-        magnitude_score = np.exp(-((mean_magnitude - 1.0) ** 2) / (2 * 0.5 ** 2))
-
-        # Score based on variance (structure present)
-        # Higher variance = more spatial structure
-        variance_score = np.tanh(mean_variance / 0.1)
+        # Prefer mid-range mean magnitude (penalize extremes)
+        magnitude_score = 1.0 - (abs(mean_norm - 0.5) * 2.0)
+        magnitude_score = self._clip01(magnitude_score)
 
         # Combine: need both magnitude and structure
-        dipole_score = 0.6 * magnitude_score + 0.4 * variance_score
+        dipole_score = 0.6 * magnitude_score + 0.4 * var_norm
 
-        return float(np.clip(dipole_score, 0, 1))
+        return self._clip01(dipole_score)
 
     def _score_artifacts(self, metadata: pd.Series) -> float:
         """
@@ -337,6 +379,109 @@ class MovingObjectScorer:
 
         return penalty
 
+    def _score_blinker_penalty(self, idx: int) -> float:
+        """
+        Penalize likely blinkers or transient artifacts for motion encoder outputs.
+
+        Uses blob persistence from the motion feature vector:
+        low persistence -> higher penalty.
+        """
+        if self.encoder_type != "motion":
+            return 0.0
+
+        use_optical_flow = bool(self.motion_feature_config.get("use_optical_flow", True))
+        use_ai_features = bool(self.motion_feature_config.get("use_ai_features", False))
+
+        # Motion feature layout:
+        # diff (16) + flow (15 if enabled) + blob (8) + temporal (8) + optional AI (768)
+        if use_optical_flow:
+            blob_persistence_idx = 16 + 15 + 7
+            min_dim = 47
+        else:
+            blob_persistence_idx = 16 + 7
+            min_dim = 32
+
+        if use_ai_features:
+            min_dim += 768
+
+        if self.embeddings.shape[1] < min_dim:
+            return 0.0
+
+        persistence = float(self.embeddings[idx][blob_persistence_idx])
+        penalty = 1.0 - np.clip(persistence, 0.0, 1.0)
+        return float(penalty)
+
+    @staticmethod
+    def _label_blinker_artifact(
+        artifact_penalty: float,
+        blinker_penalty: float,
+        blinker_classifier_score: float,
+    ) -> bool:
+        """Flag likely blinkers/artifacts for downstream filtering."""
+        return (
+            artifact_penalty < 0.0
+            or blinker_penalty >= 0.5
+            or blinker_classifier_score >= 0.7
+        )
+
+    def _fit_blinker_classifier(self) -> None:
+        """Train a lightweight classifier to predict blinkers from features."""
+        if self.encoder_type != "motion":
+            return
+        if not self.blinker_classifier_config.get("enabled", False):
+            return
+
+        try:
+            from sklearn.linear_model import LogisticRegression
+            from sklearn.pipeline import make_pipeline
+            from sklearn.preprocessing import StandardScaler
+        except ImportError:
+            logger.warning("scikit-learn not available; skipping blinker classifier")
+            return
+
+        use_optical_flow = bool(self.motion_feature_config.get("use_optical_flow", True))
+        low_thresh = float(self.blinker_classifier_config.get("low_persistence_threshold", 0.2))
+        high_thresh = float(self.blinker_classifier_config.get("high_persistence_threshold", 0.8))
+        min_samples = int(self.blinker_classifier_config.get("min_samples", 50))
+
+        # Derive persistence labels from motion features.
+        if use_optical_flow:
+            persistence_idx = 16 + 15 + 7
+        else:
+            persistence_idx = 16 + 7
+
+        if self.embeddings.shape[1] <= persistence_idx:
+            return
+
+        persistence = self.embeddings[:, persistence_idx].astype(float)
+        y = np.full(len(persistence), -1, dtype=int)
+        y[persistence <= low_thresh] = 1
+        y[persistence >= high_thresh] = 0
+
+        # Use only confident pseudo-labels.
+        mask = y >= 0
+        if mask.sum() < min_samples:
+            return
+
+        X = self.embeddings[mask]
+        y = y[mask]
+
+        model = make_pipeline(
+            StandardScaler(),
+            LogisticRegression(
+                max_iter=200,
+                solver="saga",
+                n_jobs=1,
+            ),
+        )
+        model.fit(X, y)
+        self._blinker_classifier_scores = model.predict_proba(self.embeddings)[:, 1]
+
+    def _score_blinker_classifier_penalty(self, idx: int) -> float:
+        if self._blinker_classifier_scores is None:
+            return 0.0
+        return float(np.clip(self._blinker_classifier_scores[idx], 0.0, 1.0))
+
     def get_top_candidates(self, n: int = 100) -> pd.DataFrame:
         """
         Get top N moving object candidates.
@@ -364,6 +509,29 @@ class MovingObjectScorer:
 
         magnitudes = np.linalg.norm(mean_deltas, axis=1)
         return magnitudes
+
+    @staticmethod
+    def _robust_minmax(
+        values: np.ndarray, low_pct: float = 5.0, high_pct: float = 95.0
+    ):
+        """Scale values to [0, 1] using robust percentiles to avoid saturation."""
+        low = float(np.percentile(values, low_pct))
+        high = float(np.percentile(values, high_pct))
+        if not np.isfinite(low) or not np.isfinite(high) or high <= low:
+            scaled = np.zeros_like(values, dtype=float)
+            return scaled, low, high
+        scaled = (values - low) / (high - low)
+        return np.clip(scaled, 0.0, 1.0), low, high
+
+    @staticmethod
+    def _normalize_value(value: float, low: float, high: float) -> float:
+        if not np.isfinite(low) or not np.isfinite(high) or high <= low:
+            return 0.5
+        return float(np.clip((value - low) / (high - low), 0.0, 1.0))
+
+    @staticmethod
+    def _clip01(value: float) -> float:
+        return float(np.clip(value, 0.0, 1.0))
 
     def get_consistency_scores(self) -> np.ndarray:
         """

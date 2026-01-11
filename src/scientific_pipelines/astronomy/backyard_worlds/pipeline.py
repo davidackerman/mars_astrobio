@@ -289,6 +289,9 @@ class BackyardWorldsPipeline:
                 novelty_detector=novelty_detector,
                 sequence_encoder=self.sequence_encoder,
                 optimal_motion=optimal_motion,
+                encoder_type=encoder_type,
+                motion_feature_config=motion_config if encoder_type == 'motion' else {},
+                blinker_classifier_config=self.config.get('blinker_classifier', {}),
             )
         else:  # 'brown_dwarf'
             scoring_weights = self.config.get('brown_dwarf_scoring', {}).get('weights')

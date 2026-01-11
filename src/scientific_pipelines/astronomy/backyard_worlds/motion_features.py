@@ -42,10 +42,12 @@ class MotionFeatureExtractor:
         use_optical_flow: bool = True,
         use_ai_features: bool = False,
         device: str = "cpu",
+        ai_input: str = "rgb",
     ):
         self.use_optical_flow = use_optical_flow
         self.use_ai_features = use_ai_features
         self.device = device
+        self.ai_input = ai_input
 
         # Initialize VideoMAE if requested
         self.video_model = None
@@ -61,10 +63,10 @@ class MotionFeatureExtractor:
                 ).to(device)
                 self.video_model.eval()
                 logger.info("VideoMAE loaded successfully")
-            except ImportError:
+            except (ImportError, OSError, RuntimeError) as exc:
                 logger.warning(
-                    "transformers not available, AI features disabled. "
-                    "Install with: pip install transformers"
+                    "VideoMAE unavailable (%s); AI features disabled.",
+                    exc,
                 )
                 self.use_ai_features = False
 
@@ -98,7 +100,8 @@ class MotionFeatureExtractor:
 
         # Extract AI features if enabled
         if self.use_ai_features and self.video_model is not None:
-            ai_features = self._extract_ai_features(frames_rgb)
+            ai_frames = self._prepare_ai_frames(frames_gray, frames_rgb)
+            ai_features = self._extract_ai_features(ai_frames)
             features = np.concatenate([cv_features, ai_features])
         else:
             features = cv_features
@@ -338,6 +341,14 @@ class MotionFeatureExtractor:
         # Convert frames to PIL Images
         pil_frames = [Image.fromarray(f) for f in frames]
 
+        # VideoMAE expects 224x224 and typically 16 frames; pad/loop as needed.
+        pil_frames = [f.resize((224, 224), Image.BILINEAR) for f in pil_frames]
+        if len(pil_frames) < 16:
+            repeat = (16 + len(pil_frames) - 1) // len(pil_frames)
+            pil_frames = (pil_frames * repeat)[:16]
+        elif len(pil_frames) > 16:
+            pil_frames = pil_frames[:16]
+
         # Process through VideoMAE
         inputs = self.video_processor(pil_frames, return_tensors="pt")
         inputs = {k: v.to(self.device) for k, v in inputs.items()}
@@ -348,6 +359,52 @@ class MotionFeatureExtractor:
             embeddings = outputs.last_hidden_state[:, 0, :].cpu().numpy()
 
         return embeddings.flatten().astype(np.float32)
+
+    def _prepare_ai_frames(
+        self,
+        frames_gray: List[np.ndarray],
+        frames_rgb: List[np.ndarray],
+    ) -> List[np.ndarray]:
+        """Prepare frames for VideoMAE based on selected input mode."""
+        if self.ai_input == "rgb":
+            return frames_rgb
+
+        if self.ai_input == "diff":
+            diffs = []
+            for i in range(len(frames_gray) - 1):
+                diff = cv2.absdiff(frames_gray[i], frames_gray[i + 1])
+                diffs.append(diff)
+            if not diffs:
+                return frames_rgb
+            while len(diffs) < len(frames_gray):
+                diffs.append(diffs[-1])
+            return [cv2.cvtColor(d, cv2.COLOR_GRAY2RGB) for d in diffs]
+
+        if self.ai_input == "flow":
+            flows = []
+            for i in range(len(frames_gray) - 1):
+                flow = cv2.calcOpticalFlowFarneback(
+                    frames_gray[i],
+                    frames_gray[i + 1],
+                    None,
+                    pyr_scale=0.5,
+                    levels=3,
+                    winsize=15,
+                    iterations=3,
+                    poly_n=5,
+                    poly_sigma=1.2,
+                    flags=0,
+                )
+                mag, _ = cv2.cartToPolar(flow[..., 0], flow[..., 1])
+                mag_norm = cv2.normalize(mag, None, 0, 255, cv2.NORM_MINMAX)
+                flows.append(mag_norm.astype(np.uint8))
+            if not flows:
+                return frames_rgb
+            while len(flows) < len(frames_gray):
+                flows.append(flows[-1])
+            return [cv2.cvtColor(f, cv2.COLOR_GRAY2RGB) for f in flows]
+
+        return frames_rgb
 
     def get_feature_dim(self) -> int:
         """Get the dimensionality of the extracted feature vector."""
