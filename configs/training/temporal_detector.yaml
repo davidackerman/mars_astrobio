@@ -1,0 +1,48 @@
+# Configuration for temporal object detector training
+
+# Data
+data_dir: "data/backyard_worlds/ground_truth"
+annotations_file: "annotations.json"
+
+# Model
+model:
+  num_classes: 2  # mover, dipole
+  pretrained: true
+  freeze_backbone: true
+  heatmap_size: [8, 8]
+
+# Training
+training:
+  num_epochs: 100
+  batch_size: 4
+  augmentation_multiplier: 50  # 4 train samples → 200 augmented samples
+  learning_rate: 0.0001
+  weight_decay: 0.0001
+  early_stopping_patience: 20
+
+# Loss weights
+loss:
+  alpha_cls: 1.0
+  alpha_heatmap: 2.0
+  focal_alpha: 0.25
+  focal_gamma: 2.0
+
+# Data augmentation
+augmentation:
+  input_size: [256, 256]
+  # Spatial augmentations (frame-consistent)
+  rotation_prob: 0.5
+  flip_prob: 0.5
+  affine_prob: 0.7
+  # Photometric augmentations
+  brightness_contrast_prob: 0.7
+  noise_prob: 0.6
+  blur_prob: 0.3
+
+# Metrics
+metrics:
+  distance_threshold: 15.0  # pixels
+
+# Output
+checkpoint_dir: "checkpoints/temporal_detector"
+log_dir: "logs/temporal_detector"
