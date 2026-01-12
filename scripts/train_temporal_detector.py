@@ -11,6 +11,7 @@ import copy
 import logging
 from pathlib import Path
 from typing import Dict, List
+from datetime import datetime
 
 import torch
 import torch.nn as nn
@@ -18,12 +19,17 @@ from torch.utils.data import DataLoader, Subset, ConcatDataset
 from torch.utils.tensorboard import SummaryWriter
 from tqdm import tqdm
 import numpy as np
+import torchvision
 
 # Add src to path
 import sys
 sys.path.insert(0, str(Path(__file__).parent.parent / 'src'))
 
-from scientific_pipelines.core.training.models import TemporalObjectDetector
+from scientific_pipelines.core.training.models import (
+    TemporalObjectDetector,
+    FrameStackObjectDetector,
+    DiffStreamObjectDetector,
+)
 from scientific_pipelines.core.training.losses import DetectionLoss
 from scientific_pipelines.core.training.datasets import (
     BackyardWorldsTemporalDataset,
@@ -92,6 +98,8 @@ class LOOCVTrainer:
         augmentation_multiplier: int = 50,
         checkpoint_dir: Path = Path("checkpoints"),
         log_dir: Path = Path("logs"),
+        score_threshold: float = 0.1,
+        log_heatmaps: bool = True,
     ):
         self.model = model
         self.loss_fn = loss_fn
@@ -103,6 +111,8 @@ class LOOCVTrainer:
         self.augmentation_multiplier = augmentation_multiplier
         self.checkpoint_dir = Path(checkpoint_dir)
         self.checkpoint_dir.mkdir(parents=True, exist_ok=True)
+        self.score_threshold = score_threshold
+        self.log_heatmaps = log_heatmaps
 
         # Create TensorBoard writer
         self.log_dir = Path(log_dir)
@@ -138,14 +148,14 @@ class LOOCVTrainer:
         best_val_metrics = {}
         best_model_state = None
         patience_counter = 0
-        patience = 20
+        patience = 100
 
         for epoch in range(self.num_epochs):
             # Training
             train_loss, train_loss_dict = self._train_epoch(train_loader)
 
             # Validation
-            val_loss, val_loss_dict, val_metrics = self._validate_epoch(val_loader)
+            val_loss, val_loss_dict, val_metrics = self._validate_epoch(val_loader, epoch)
 
             # Learning rate scheduling
             self.scheduler.step(val_loss)
@@ -244,7 +254,7 @@ class LOOCVTrainer:
 
         return avg_loss, avg_loss_dict
 
-    def _validate_epoch(self, val_loader: DataLoader) -> tuple:
+    def _validate_epoch(self, val_loader: DataLoader, epoch: int) -> tuple:
         """Validate for one epoch."""
         self.model.eval()
         total_loss = 0.0
@@ -253,6 +263,8 @@ class LOOCVTrainer:
 
         all_predictions = []
         all_targets = []
+
+        logged_heatmaps = False
 
         with torch.no_grad():
             for batch in val_loader:
@@ -275,7 +287,19 @@ class LOOCVTrainer:
                 num_batches += 1
 
                 # Decode predictions for metrics
-                decoded_preds = self.model.decode_predictions(class_logits, heatmaps)
+                decoded_preds = self.model.decode_predictions(
+                    class_logits,
+                    heatmaps,
+                    score_threshold=self.score_threshold,
+                )
+
+                if (
+                    self.writer is not None
+                    and self.log_heatmaps
+                    and not logged_heatmaps
+                ):
+                    self._log_heatmaps(frames, heatmap_targets, heatmaps, epoch)
+                    logged_heatmaps = True
 
                 # Prepare targets for metrics
                 for i in range(len(batch['sequence_id'])):
@@ -294,6 +318,26 @@ class LOOCVTrainer:
         metrics = self.metrics_fn.compute_metrics(all_predictions, all_targets)
 
         return avg_loss, avg_loss_dict, metrics
+
+    def _log_heatmaps(
+        self,
+        frames: torch.Tensor,
+        heatmap_targets: torch.Tensor,
+        heatmaps: torch.Tensor,
+        epoch: int,
+    ) -> None:
+        """Log a single validation sample's frames and heatmaps to TensorBoard."""
+        frames_cpu = frames[0].detach().cpu()  # (T, C, H, W)
+        target_maps = heatmap_targets[0].detach().cpu()  # (C, H', W')
+        pred_maps = torch.sigmoid(heatmaps[0]).detach().cpu()
+
+        frame_grid = torchvision.utils.make_grid(frames_cpu, nrow=frames_cpu.shape[0])
+        self.writer.add_image("Samples/frames", frame_grid, epoch)
+
+        target_grid = torchvision.utils.make_grid(target_maps.unsqueeze(1), nrow=target_maps.shape[0])
+        pred_grid = torchvision.utils.make_grid(pred_maps.unsqueeze(1), nrow=pred_maps.shape[0])
+        self.writer.add_image("Samples/heatmap_targets", target_grid, epoch)
+        self.writer.add_image("Samples/heatmap_preds", pred_grid, epoch)
 
     def cross_validate(self, full_dataset: BackyardWorldsTemporalDataset) -> Dict:
         """Run full leave-one-out cross-validation."""
@@ -420,11 +464,40 @@ def main():
         default=Path("logs/temporal_detector"),
         help="Directory for TensorBoard logs"
     )
+    parser.add_argument(
+        "--model",
+        type=str,
+        choices=["temporal", "framestack", "diff"],
+        default="temporal",
+        help="Model variant to train"
+    )
+    parser.add_argument(
+        "--score-threshold",
+        type=float,
+        default=0.1,
+        help="Heatmap peak score threshold for decoding detections"
+    )
+    parser.add_argument(
+        "--alpha-heatmap",
+        type=float,
+        default=5.0,
+        help="Heatmap loss weight"
+    )
+    parser.add_argument(
+        "--log-heatmaps",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help="Log heatmap targets/predictions to TensorBoard"
+    )
 
     args = parser.parse_args()
 
     logger.info(f"Device: {args.device}")
     logger.info(f"Data directory: {args.data_dir}")
+    run_id = f"{args.model}_run_{datetime.now().strftime('%%Y%%m%%d_%%H%%M%%S')}"
+    args.checkpoint_dir = args.checkpoint_dir / args.model / run_id
+    args.log_dir = args.log_dir / args.model / run_id
+
     logger.info(f"Checkpoint directory: {args.checkpoint_dir}")
     logger.info(f"TensorBoard log directory: {args.log_dir}")
 
@@ -456,19 +529,34 @@ def main():
     logger.info(f"Loaded {len(train_dataset)} annotated sequences")
 
     # Create model
-    model = TemporalObjectDetector(
-        num_classes=2,
-        pretrained=True,
-        freeze_backbone=True,
-        heatmap_size=(8, 8),
-    ).to(args.device)
+    if args.model == "framestack":
+        model = FrameStackObjectDetector(
+            num_classes=2,
+            pretrained=True,
+            freeze_backbone=True,
+            heatmap_size=(8, 8),
+        ).to(args.device)
+    elif args.model == "diff":
+        model = DiffStreamObjectDetector(
+            num_classes=2,
+            pretrained=True,
+            freeze_backbone=True,
+            heatmap_size=(8, 8),
+        ).to(args.device)
+    else:
+        model = TemporalObjectDetector(
+            num_classes=2,
+            pretrained=True,
+            freeze_backbone=True,
+            heatmap_size=(8, 8),
+        ).to(args.device)
 
     logger.info(f"Model created with {sum(p.numel() for p in model.parameters() if p.requires_grad):,} trainable parameters")
 
     # Create loss function
     loss_fn = DetectionLoss(
         alpha_cls=1.0,
-        alpha_heatmap=2.0,
+        alpha_heatmap=args.alpha_heatmap,
         focal_alpha=0.25,
         focal_gamma=2.0,
     )
@@ -503,6 +591,8 @@ def main():
         augmentation_multiplier=args.aug_multiplier,
         checkpoint_dir=args.checkpoint_dir,
         log_dir=args.log_dir,
+        score_threshold=args.score_threshold,
+        log_heatmaps=args.log_heatmaps,
     )
 
     # Run cross-validation

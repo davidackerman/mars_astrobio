@@ -23,7 +23,7 @@ training:
 # Loss weights
 loss:
   alpha_cls: 1.0
-  alpha_heatmap: 2.0
+  alpha_heatmap: 5.0
   focal_alpha: 0.25
   focal_gamma: 2.0
 
@@ -42,6 +42,7 @@ augmentation:
 # Metrics
 metrics:
   distance_threshold: 15.0  # pixels
+  score_threshold: 0.1      # heatmap peak confidence
 
 # Output
 checkpoint_dir: "checkpoints/temporal_detector"
