@@ -24,6 +24,7 @@ Implementation
 Training options
 - Use `--balanced-sampling` to balance training crops across classes.
 - Use `--any-object` to collapse mover/dipole into a single label.
+- Use `--early-stopping-patience` to stop when val loss stalls.
 
 Next steps
 - Tune crop size and positive fraction (e.g., 96-192px, 0.5-0.8 positive).

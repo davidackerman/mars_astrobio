@@ -189,10 +189,13 @@ def train_fold(
     num_epochs: int,
     threshold: float,
     threshold_sweep: bool,
+    early_stopping_patience: int,
+    early_stopping_delta: float,
 ) -> Dict[str, float]:
     best_val_loss = float('inf')
     best_metrics: Dict[str, float] = {}
     best_threshold = threshold
+    patience_counter = 0
 
     for epoch in range(num_epochs):
         model.train()
@@ -229,6 +232,7 @@ def train_fold(
         labels_all = torch.cat(all_labels)
         metrics = compute_metrics(logits_all, labels_all, threshold=threshold)
         epoch_best_threshold = threshold
+        log_metrics = metrics
         if threshold_sweep:
             best_micro = -1.0
             for t in [i / 20 for i in range(1, 20)]:
@@ -236,21 +240,28 @@ def train_fold(
                 if sweep_metrics['micro_f1'] > best_micro:
                     best_micro = sweep_metrics['micro_f1']
                     epoch_best_threshold = t
+                    log_metrics = sweep_metrics
 
-        if val_loss < best_val_loss:
+        if val_loss < best_val_loss - early_stopping_delta:
             best_val_loss = val_loss
             if threshold_sweep:
-                best_metrics = compute_metrics(logits_all, labels_all, threshold=epoch_best_threshold)
+                best_metrics = log_metrics
                 best_threshold = epoch_best_threshold
             else:
                 best_metrics = metrics
                 best_threshold = threshold
+            patience_counter = 0
+        else:
+            patience_counter += 1
 
         if epoch % 5 == 0 or epoch == num_epochs - 1:
             logger.info(
                 "Epoch %03d/%d | Train Loss=%.4f | Val Loss=%.4f | Val micro-F1=%.3f | Thr=%.2f",
-                epoch, num_epochs, train_loss, val_loss, metrics['micro_f1'], epoch_best_threshold
+                epoch, num_epochs, train_loss, val_loss, log_metrics['micro_f1'], epoch_best_threshold
             )
+        if early_stopping_patience > 0 and patience_counter >= early_stopping_patience:
+            logger.info("Early stopping at epoch %d", epoch)
+            break
 
     best_metrics['best_threshold'] = best_threshold
     logger.info("Best threshold for fold: %.2f", best_threshold)
@@ -270,7 +281,7 @@ def main() -> None:
     parser.add_argument("--positive-fraction", type=float, default=0.5)
     parser.add_argument("--batch-size", type=int, default=16)
     parser.add_argument("--num-epochs", type=int, default=30)
-    parser.add_argument("--lr", type=float, default=1e-3)
+    parser.add_argument("--lr", type=float, default=3e-4)
     parser.add_argument("--weight-decay", type=float, default=1e-4)
     parser.add_argument("--base-channels", type=int, default=16)
     parser.add_argument("--device", type=str, default="cuda" if torch.cuda.is_available() else "cpu")
@@ -282,6 +293,8 @@ def main() -> None:
     parser.add_argument("--balanced-sampling", action="store_true", help="Balance class sampling in training")
     parser.add_argument("--negative-ratio", type=float, default=1.0, help="Negatives per class in balanced sampling")
     parser.add_argument("--any-object", action="store_true", help="Collapse mover/dipole into one label")
+    parser.add_argument("--early-stopping-patience", type=int, default=8, help="Epochs without val improvement")
+    parser.add_argument("--early-stopping-delta", type=float, default=1e-3, help="Min val loss delta to reset patience")
     args = parser.parse_args()
 
     train_transform = None
@@ -409,6 +422,8 @@ def main() -> None:
             args.num_epochs,
             args.threshold,
             args.threshold_sweep,
+            args.early_stopping_patience,
+            args.early_stopping_delta,
         )
         fold_metrics.append(metrics)
 
