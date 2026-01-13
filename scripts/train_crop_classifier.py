@@ -125,6 +125,35 @@ def compute_pos_weight(loader: DataLoader) -> torch.Tensor:
     return pos_weight
 
 
+class SoftF1Loss(nn.Module):
+    """Differentiable F1 loss for multi-label classification."""
+
+    def __init__(self, eps: float = 1e-7):
+        super().__init__()
+        self.eps = eps
+
+    def forward(self, logits: torch.Tensor, targets: torch.Tensor) -> torch.Tensor:
+        probs = torch.sigmoid(logits)
+        tp = (probs * targets).sum(dim=0)
+        fp = (probs * (1 - targets)).sum(dim=0)
+        fn = ((1 - probs) * targets).sum(dim=0)
+        f1 = (2 * tp + self.eps) / (2 * tp + fp + fn + self.eps)
+        return 1 - f1.mean()
+
+
+class CombinedLoss(nn.Module):
+    """Weighted sum of two losses."""
+
+    def __init__(self, loss_a: nn.Module, loss_b: nn.Module, weight_b: float):
+        super().__init__()
+        self.loss_a = loss_a
+        self.loss_b = loss_b
+        self.weight_b = weight_b
+
+    def forward(self, logits: torch.Tensor, targets: torch.Tensor) -> torch.Tensor:
+        return self.loss_a(logits, targets) + self.weight_b * self.loss_b(logits, targets)
+
+
 def build_subject_index_map(samples: List[Dict]) -> Dict[str, List[int]]:
     subject_map: Dict[str, List[int]] = {}
     for idx, sample in enumerate(samples):
@@ -295,6 +324,14 @@ def main() -> None:
     parser.add_argument("--any-object", action="store_true", help="Collapse mover/dipole into one label")
     parser.add_argument("--early-stopping-patience", type=int, default=8, help="Epochs without val improvement")
     parser.add_argument("--early-stopping-delta", type=float, default=1e-3, help="Min val loss delta to reset patience")
+    parser.add_argument(
+        "--loss",
+        type=str,
+        default="bce",
+        choices=["bce", "softf1", "bce+softf1"],
+        help="Loss function",
+    )
+    parser.add_argument("--softf1-weight", type=float, default=0.5, help="Weight for SoftF1 in combined loss")
     args = parser.parse_args()
 
     train_transform = None
@@ -395,12 +432,18 @@ def main() -> None:
             base_channels=args.base_channels,
         ).to(args.device)
 
+        bce_pos_weight = None
         if args.use_pos_weight:
-            pos_weight = compute_pos_weight(train_loader).to(args.device)
-            logger.info("Using pos_weight=%s", pos_weight.detach().cpu().numpy().round(3))
-            loss_fn = nn.BCEWithLogitsLoss(pos_weight=pos_weight)
+            bce_pos_weight = compute_pos_weight(train_loader).to(args.device)
+            logger.info("Using pos_weight=%s", bce_pos_weight.detach().cpu().numpy().round(3))
+
+        if args.loss == "softf1":
+            loss_fn = SoftF1Loss()
+        elif args.loss == "bce+softf1":
+            bce = nn.BCEWithLogitsLoss(pos_weight=bce_pos_weight)
+            loss_fn = CombinedLoss(bce, SoftF1Loss(), args.softf1_weight)
         else:
-            loss_fn = nn.BCEWithLogitsLoss()
+            loss_fn = nn.BCEWithLogitsLoss(pos_weight=bce_pos_weight)
         optimizer = torch.optim.AdamW(
             model.parameters(),
             lr=args.lr,
