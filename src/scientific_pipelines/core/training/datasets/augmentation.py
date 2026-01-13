@@ -176,9 +176,9 @@ class TemporalSequenceAugmentation:
         else:
             alpha, beta = 1.0, 0.0
 
-        # Gaussian noise
-        add_noise = random.random() < 0.6
-        noise_sigma = random.uniform(10, 30) if add_noise else 0
+        # Gaussian noise (reduced to avoid overwhelming signal)
+        add_noise = random.random() < 0.2
+        noise_sigma = random.uniform(2, 8) if add_noise else 0
 
         # Blur
         add_blur = random.random() < 0.3
@@ -191,8 +191,8 @@ class TemporalSequenceAugmentation:
 
             # Gaussian noise
             if add_noise:
-                noise = np.random.normal(0, noise_sigma, frame_aug.shape).astype(np.uint8)
-                frame_aug = cv2.add(frame_aug, noise)
+                noise = np.random.normal(0, noise_sigma, frame_aug.shape).astype(np.int16)
+                frame_aug = np.clip(frame_aug.astype(np.int16) + noise, 0, 255).astype(np.uint8)
 
             # Blur
             if add_blur:
