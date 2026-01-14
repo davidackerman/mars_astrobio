@@ -24,15 +24,18 @@ class TemporalSequenceAugmentation:
     Args:
         input_size: Target image size (height, width)
         training: If True, apply augmentations. If False, only resize + normalize
+        enable_noise: If True, allow Gaussian noise during training augmentations
     """
 
     def __init__(
         self,
         input_size: Tuple[int, int] = (256, 256),
         training: bool = True,
+        enable_noise: bool = True,
     ):
         self.input_size = input_size
         self.training = training
+        self.enable_noise = enable_noise
 
         # ImageNet normalization (for ResNet pretrained weights)
         self.normalize = T.Normalize(
@@ -177,7 +180,7 @@ class TemporalSequenceAugmentation:
             alpha, beta = 1.0, 0.0
 
         # Gaussian noise (reduced to avoid overwhelming signal)
-        add_noise = random.random() < 0.2
+        add_noise = self.enable_noise and random.random() < 0.2
         noise_sigma = random.uniform(2, 8) if add_noise else 0
 
         # Blur
