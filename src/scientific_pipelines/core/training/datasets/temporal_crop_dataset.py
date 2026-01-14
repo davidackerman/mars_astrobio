@@ -18,8 +18,10 @@ from torch.utils.data import Dataset
 
 try:
     from .augmentation import TemporalSequenceAugmentation
+    from .crop_config import crop_frames, adjust_keypoints, crop_bounds
 except ImportError:
     from augmentation import TemporalSequenceAugmentation
+    from crop_config import crop_frames, adjust_keypoints, crop_bounds
 
 logger = logging.getLogger(__name__)
 
@@ -73,7 +75,7 @@ class BackyardWorldsTemporalCropDataset(Dataset):
             subject_id: self._parse_annotations(self.annotations[subject_id])
             for subject_id in self.subject_ids
         }
-        self.subject_sizes = self._load_subject_sizes()
+        self.subject_sizes, self.subject_original_sizes = self._load_subject_sizes()
         self.samples = samples if samples is not None else self._build_samples()
 
         logger.info("Loaded %d annotated sequences", len(self.subject_ids))
@@ -88,9 +90,10 @@ class BackyardWorldsTemporalCropDataset(Dataset):
         center = sample['center']
 
         frames_dir = self.data_dir / "subjects_groundtruth" / subject_id
-        frames = self._load_frames(frames_dir)
+        frames, original_size = self._load_frames(frames_dir)
 
         keypoints, labels = self.subject_keypoints[subject_id]
+        keypoints, labels = adjust_keypoints(keypoints, labels, original_size)
 
         crop_frames, keypoints_crop, labels_crop, crop_origin = self._crop_sequence(
             frames, keypoints, labels, center
@@ -119,6 +122,8 @@ class BackyardWorldsTemporalCropDataset(Dataset):
         samples = []
         for subject_id in self.subject_ids:
             keypoints, labels = self.subject_keypoints[subject_id]
+            original_size = self.subject_original_sizes[subject_id]
+            keypoints, labels = adjust_keypoints(keypoints, labels, original_size)
             image_size = self.subject_sizes[subject_id]
             positive_keypoints = list(zip(keypoints, labels))
 
@@ -145,7 +150,7 @@ class BackyardWorldsTemporalCropDataset(Dataset):
 
         return samples
 
-    def _load_frames(self, frames_dir: Path) -> List[np.ndarray]:
+    def _load_frames(self, frames_dir: Path) -> Tuple[List[np.ndarray], Tuple[int, int]]:
         frames = []
         for i in range(4):
             frame_path = frames_dir / f"frame_{i:02d}.jpg"
@@ -154,10 +159,12 @@ class BackyardWorldsTemporalCropDataset(Dataset):
             frame = cv2.imread(str(frame_path))
             frame = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
             frames.append(frame)
-        return frames
+        original_size = frames[0].shape[:2]
+        return crop_frames(frames), original_size
 
-    def _load_subject_sizes(self) -> Dict[str, Tuple[int, int]]:
+    def _load_subject_sizes(self) -> Tuple[Dict[str, Tuple[int, int]], Dict[str, Tuple[int, int]]]:
         sizes = {}
+        original_sizes = {}
         for subject_id in self.subject_ids:
             frames_dir = self.data_dir / "subjects_groundtruth" / subject_id
             frame_path = frames_dir / "frame_00.jpg"
@@ -167,8 +174,10 @@ class BackyardWorldsTemporalCropDataset(Dataset):
             if frame is None:
                 raise ValueError(f"Failed to read frame: {frame_path}")
             h, w = frame.shape[:2]
-            sizes[subject_id] = (h, w)
-        return sizes
+            original_sizes[subject_id] = (h, w)
+            left, top, right, bottom = crop_bounds((h, w))
+            sizes[subject_id] = (bottom - top, right - left)
+        return sizes, original_sizes
 
     def _parse_annotations(
         self,
@@ -236,6 +245,8 @@ class BackyardWorldsTemporalCropDataset(Dataset):
             subject_id = sample['subject_id']
             center = sample['center']
             keypoints, labels = self.subject_keypoints[subject_id]
+            original_size = self.subject_original_sizes[subject_id]
+            keypoints, labels = adjust_keypoints(keypoints, labels, original_size)
             image_size = self.subject_sizes[subject_id]
             left, top, right, bottom = self._compute_crop_bounds(center, image_size)
             labels_in_crop = []

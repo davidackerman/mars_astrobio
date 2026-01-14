@@ -17,9 +17,11 @@ from torch.utils.data import Dataset
 
 try:
     from .augmentation import TemporalSequenceAugmentation
+    from .crop_config import crop_frames, adjust_keypoints
 except ImportError:
     # Allow running as script for testing
     from augmentation import TemporalSequenceAugmentation
+    from crop_config import crop_frames, adjust_keypoints
 
 logger = logging.getLogger(__name__)
 
@@ -87,10 +89,11 @@ class BackyardWorldsTemporalDataset(Dataset):
 
         # Load frames from subjects_groundtruth/{subject_id}/
         frames_dir = self.data_dir / "subjects_groundtruth" / subject_id
-        frames = self._load_frames(frames_dir)
+        frames, original_size = self._load_frames(frames_dir)
 
         # Parse annotations to get keypoints and labels
-        keypoints, labels = self._parse_annotations(annotation, frames[0].shape[:2])
+        keypoints, labels = self._parse_annotations(annotation, original_size)
+        keypoints, labels = adjust_keypoints(keypoints, labels, original_size)
 
         # Apply augmentation
         if self.transform is not None:
@@ -114,7 +117,7 @@ class BackyardWorldsTemporalDataset(Dataset):
             'labels': labels,
         }
 
-    def _load_frames(self, frames_dir: Path) -> List[np.ndarray]:
+    def _load_frames(self, frames_dir: Path) -> Tuple[List[np.ndarray], Tuple[int, int]]:
         """Load 4 frames from directory."""
         frames = []
         for i in range(4):
@@ -127,7 +130,8 @@ class BackyardWorldsTemporalDataset(Dataset):
             frame = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
             frames.append(frame)
 
-        return frames
+        original_size = frames[0].shape[:2]
+        return crop_frames(frames), original_size
 
     def _parse_annotations(
         self,
