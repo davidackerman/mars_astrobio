@@ -209,9 +209,11 @@ def place_mover(
     rng: random.Random,
     noise_std: float,
     bounds: Tuple[int, int, int, int],
-) -> Tuple[int, int, int, int]:
+    min_radius: float,
+    max_radius: float,
+) -> Tuple[Tuple[int, int, int, int], List[Tuple[float, float]]]:
     left, top, right, bottom = bounds
-    radius = rng.uniform(5.0, 20.0)
+    radius = rng.uniform(min_radius, max_radius)
     sigma = max(0.9, radius / 4.0)
     amp = rng.uniform(5.0, 12.0) * noise_std
     color = random_color(rng)
@@ -249,7 +251,71 @@ def place_mover(
     box_size = max(10, int(math.ceil(radius * 2)))
     box_x = int(round(x0 - box_size / 2))
     box_y = int(round(y0 - box_size / 2))
-    return box_x, box_y, box_size, box_size
+    return (box_x, box_y, box_size, box_size), positions
+
+
+def add_blinker(
+    frames: List[np.ndarray],
+    rng: random.Random,
+    noise_std: float,
+    bounds: Tuple[int, int, int, int],
+    min_radius: float,
+    max_radius: float,
+) -> None:
+    left, top, right, bottom = bounds
+    radius = rng.uniform(min_radius, max_radius)
+    sigma = max(0.9, radius / 4.0)
+    amp = rng.uniform(6.0, 16.0) * noise_std
+    color = random_color(rng)
+    core_sigma = max(0.6, sigma * 0.45)
+    core_amp = amp * 1.4
+
+    margin = int(math.ceil(3 * sigma + 2))
+    x0 = rng.uniform(left + margin, right - margin)
+    y0 = rng.uniform(top + margin, bottom - margin)
+
+    on_frames: List[bool] = []
+    state_on = rng.random() < 0.5
+    idx = 0
+    while idx < 4:
+        block_len = rng.randint(1, 2)
+        for _ in range(block_len):
+            if idx >= 4:
+                break
+            on_frames.append(state_on)
+            idx += 1
+        state_on = not state_on
+
+    for i, frame in enumerate(frames):
+        if not on_frames[i]:
+            continue
+        add_gaussian(frame, x0, y0, amp, sigma, color)
+        add_gaussian(frame, x0, y0, core_amp, core_sigma, color)
+
+
+def add_background_bright(
+    frames: List[np.ndarray],
+    rng: random.Random,
+    noise_std: float,
+    bounds: Tuple[int, int, int, int],
+    min_radius: float,
+    max_radius: float,
+) -> None:
+    left, top, right, bottom = bounds
+    radius = rng.uniform(min_radius, max_radius)
+    sigma = max(0.9, radius / 4.0)
+    amp = rng.uniform(5.0, 12.0) * noise_std
+    color = random_color(rng)
+    core_sigma = max(0.6, sigma * 0.45)
+    core_amp = amp * 1.4
+
+    margin = int(math.ceil(3 * sigma + 2))
+    x0 = rng.uniform(left + margin, right - margin)
+    y0 = rng.uniform(top + margin, bottom - margin)
+
+    for frame in frames:
+        add_gaussian(frame, x0, y0, amp, sigma, color)
+        add_gaussian(frame, x0, y0, core_amp, core_sigma, color)
 
 
 def write_metadata_csv(path: Path, subjects: List[str], output_dir: Path) -> None:
@@ -351,6 +417,17 @@ def main() -> None:
     parser.add_argument("--max-movers", type=int, default=2)
     parser.add_argument("--min-dipoles", type=int, default=0)
     parser.add_argument("--max-dipoles", type=int, default=2)
+    parser.add_argument("--min-mover-radius", type=float, default=7.0)
+    parser.add_argument("--max-mover-radius", type=float, default=20.0)
+    parser.add_argument("--min-blinkers", type=int, default=0)
+    parser.add_argument("--max-blinkers", type=int, default=2)
+    parser.add_argument("--min-blinker-radius", type=float, default=6.0)
+    parser.add_argument("--max-blinker-radius", type=float, default=26.0)
+    parser.add_argument("--background-bright-prob", type=float, default=0.0)
+    parser.add_argument("--min-background-brights", type=int, default=1)
+    parser.add_argument("--max-background-brights", type=int, default=3)
+    parser.add_argument("--min-background-bright-radius", type=float, default=6.0)
+    parser.add_argument("--max-background-bright-radius", type=float, default=28.0)
     parser.add_argument(
         "--write-gifs",
         action=argparse.BooleanOptionalAction,
@@ -396,6 +473,7 @@ def main() -> None:
 
         movers = rng.randint(args.min_movers, args.max_movers)
         dipoles = rng.randint(args.min_dipoles, args.max_dipoles)
+        blinkers = rng.randint(args.min_blinkers, args.max_blinkers)
         if args.ensure_object and movers + dipoles == 0:
             if rng.random() < 0.5:
                 movers = 1
@@ -403,15 +481,46 @@ def main() -> None:
                 dipoles = 1
 
         mover_boxes: List[List[int]] = []
+        mover_tracks: List[List[List[float]]] = []
         dipole_boxes: List[List[int]] = []
 
         for _ in range(movers):
-            box = place_mover(frames, rng, noise_std, bounds)
+            box, positions = place_mover(
+                frames,
+                rng,
+                noise_std,
+                bounds,
+                args.min_mover_radius,
+                args.max_mover_radius,
+            )
             mover_boxes.append([int(v) for v in box])
+            mover_tracks.append([[float(x), float(y)] for x, y in positions])
 
         for _ in range(dipoles):
             box = place_dipole(frames, rng, noise_std, bounds)
             dipole_boxes.append([int(v) for v in box])
+
+        for _ in range(blinkers):
+            add_blinker(
+                frames,
+                rng,
+                noise_std,
+                bounds,
+                args.min_blinker_radius,
+                args.max_blinker_radius,
+            )
+
+        if rng.random() < args.background_bright_prob:
+            num_brights = rng.randint(args.min_background_brights, args.max_background_brights)
+            for _ in range(num_brights):
+                add_background_bright(
+                    frames,
+                    rng,
+                    noise_std,
+                    bounds,
+                    args.min_background_bright_radius,
+                    args.max_background_bright_radius,
+                )
 
         frames_out = [np.clip(f, 0, 255).astype(np.uint8) for f in frames]
 
@@ -426,6 +535,7 @@ def main() -> None:
         annotations[subject_id] = {
             "notes": "synthetic",
             "mover_circles": mover_boxes,
+            "mover_tracks": mover_tracks,
             "dipole_circles": dipole_boxes,
             "artifact_circles": [],
         }

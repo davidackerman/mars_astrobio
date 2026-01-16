@@ -29,6 +29,7 @@ def main() -> None:
     parser.add_argument("--data-dir", type=Path, default=Path("data/backyard_worlds/ground_truth"))
     parser.add_argument("--out-dir", type=Path, default=None, help="Output directory for images")
     parser.add_argument("--score-threshold", type=float, default=0.1)
+    parser.add_argument("--any-object", action="store_true", help="Collapse mover/dipole into one class")
     args = parser.parse_args()
 
     run_dir = Path("checkpoints/temporal_detector") / args.run
@@ -41,12 +42,14 @@ def main() -> None:
     out_dir = args.out_dir or Path("logs/temporal_detector") / args.run / "diagnostics" / f"fold_{args.fold}"
     out_dir.mkdir(parents=True, exist_ok=True)
 
+    class_names = ["object"] if args.any_object else ["mover", "dipole"]
     dataset = BackyardWorldsTemporalDataset(
         data_dir=args.data_dir,
         annotations_path=annotations_path,
         transform=None,
         heatmap_size=(8, 8),
         input_size=(256, 256),
+        class_names=class_names,
     )
 
     if args.fold >= len(dataset):
@@ -56,7 +59,7 @@ def main() -> None:
     sequence_id = sample["sequence_id"]
 
     model = TemporalObjectDetector(
-        num_classes=2,
+        num_classes=len(class_names),
         pretrained=False,
         freeze_backbone=False,
         heatmap_size=(8, 8),
@@ -78,7 +81,6 @@ def main() -> None:
     frame0 = sample["frames"][0].permute(1, 2, 0).numpy() * 255.0
     frame0 = frame0.clip(0, 255).astype(np.uint8)
 
-    class_names = ["mover", "dipole"]
     for class_id, name in enumerate(class_names):
         save_heatmap_image(pred_up[class_id], out_dir / f"{sequence_id}_pred_{name}.png")
         save_heatmap_image(target_up[class_id], out_dir / f"{sequence_id}_target_{name}.png")
@@ -94,7 +96,10 @@ def main() -> None:
     draw = ImageDraw.Draw(frame_gt)
     for (x, y), label in zip(sample["keypoints"], sample["labels"]):
         r = 6
-        color = (0, 255, 0) if label == 0 else (0, 0, 255)
+        if args.any_object:
+            color = (0, 255, 0)
+        else:
+            color = (0, 255, 0) if label == 0 else (0, 0, 255)
         draw.ellipse((x - r, y - r, x + r, y + r), outline=color, width=2)
     frame_gt.save(out_dir / f"{sequence_id}_gt_keypoints.png")
 

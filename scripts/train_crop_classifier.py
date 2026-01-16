@@ -10,6 +10,7 @@ import argparse
 import copy
 import logging
 import random
+import sys
 from datetime import datetime
 from pathlib import Path
 from typing import Dict, List, Tuple, Optional
@@ -388,9 +389,17 @@ def main() -> None:
     parser.add_argument("--use-pos-weight", action="store_true", help="Use BCE pos_weight from train data")
     parser.add_argument("--no-augmentation", action="store_true", help="Disable training augmentation")
     parser.add_argument("--no-noise", action="store_true", help="Disable Gaussian noise augmentation")
+    parser.add_argument("--no-blur", action="store_true", help="Disable blur augmentation")
     parser.add_argument("--balanced-sampling", action="store_true", help="Balance class sampling in training")
     parser.add_argument("--negative-ratio", type=float, default=1.0, help="Negatives per class in balanced sampling")
     parser.add_argument("--any-object", action="store_true", help="Collapse mover/dipole into one label")
+    parser.add_argument("--no-crop", action="store_true", help="Disable crop config for already-cropped frames")
+    parser.add_argument(
+        "--positive-jitter",
+        type=parse_size,
+        default=None,
+        help="Max jitter (dy,dx) for positive crop centers",
+    )
     parser.add_argument(
         "--val-fraction",
         type=float,
@@ -445,7 +454,33 @@ def main() -> None:
         default=0,
         help="Save periodic checkpoints every N epochs (0 disables)",
     )
+    parser.add_argument(
+        "--negative-bright-fraction",
+        type=float,
+        default=0.5,
+        help="Fraction of negative crops biased toward bright background regions",
+    )
+    parser.add_argument(
+        "--negative-bright-percentile",
+        type=float,
+        default=85.0,
+        help="Brightness percentile used to define bright negative crops",
+    )
+    parser.add_argument(
+        "--negative-bright-samples",
+        type=int,
+        default=200,
+        help="Number of samples to estimate brightness threshold per subject",
+    )
+    parser.add_argument(
+        "--positive-mover-min-frames",
+        type=int,
+        default=0,
+        help="Require mover crops to include at least this many frames (0 disables)",
+    )
     args = parser.parse_args()
+
+    logger.info("Command: %s", " ".join(sys.argv))
 
     if args.save_checkpoints is None:
         timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
@@ -457,6 +492,7 @@ def main() -> None:
             input_size=args.crop_size,
             training=True,
             enable_noise=not args.no_noise,
+            enable_blur=not args.no_blur,
         )
     val_transform = TemporalSequenceAugmentation(
         input_size=args.crop_size,
@@ -471,6 +507,12 @@ def main() -> None:
         samples_per_subject=args.samples_per_subject,
         positive_fraction=args.positive_fraction,
         seed=args.seed,
+        apply_crop=not args.no_crop,
+        positive_jitter=args.positive_jitter,
+        negative_bright_fraction=args.negative_bright_fraction,
+        negative_bright_percentile=args.negative_bright_percentile,
+        negative_bright_samples=args.negative_bright_samples,
+        positive_mover_min_frames=args.positive_mover_min_frames,
     )
 
     subject_map = build_subject_index_map(base_dataset.samples)
@@ -535,6 +577,12 @@ def main() -> None:
             positive_fraction=args.positive_fraction,
             seed=args.seed,
             samples=base_dataset.samples,
+            apply_crop=not args.no_crop,
+            positive_jitter=args.positive_jitter,
+            negative_bright_fraction=args.negative_bright_fraction,
+            negative_bright_percentile=args.negative_bright_percentile,
+            negative_bright_samples=args.negative_bright_samples,
+            positive_mover_min_frames=args.positive_mover_min_frames,
         )
         val_dataset = BackyardWorldsTemporalCropDataset(
             data_dir=args.data_dir,
@@ -545,6 +593,12 @@ def main() -> None:
             positive_fraction=args.positive_fraction,
             seed=args.seed,
             samples=base_dataset.samples,
+            apply_crop=not args.no_crop,
+            positive_jitter=args.positive_jitter,
+            negative_bright_fraction=args.negative_bright_fraction,
+            negative_bright_percentile=args.negative_bright_percentile,
+            negative_bright_samples=args.negative_bright_samples,
+            positive_mover_min_frames=args.positive_mover_min_frames,
         )
 
         if args.balanced_sampling:

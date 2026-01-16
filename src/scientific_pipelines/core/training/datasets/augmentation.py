@@ -32,10 +32,14 @@ class TemporalSequenceAugmentation:
         input_size: Tuple[int, int] = (256, 256),
         training: bool = True,
         enable_noise: bool = True,
+        noise_sigma_range: Tuple[float, float] = (2.0, 8.0),
+        enable_blur: bool = True,
     ):
         self.input_size = input_size
         self.training = training
         self.enable_noise = enable_noise
+        self.noise_sigma_range = noise_sigma_range
+        self.enable_blur = enable_blur
 
         # ImageNet normalization (for ResNet pretrained weights)
         self.normalize = T.Normalize(
@@ -181,10 +185,10 @@ class TemporalSequenceAugmentation:
 
         # Gaussian noise (reduced to avoid overwhelming signal)
         add_noise = self.enable_noise and random.random() < 0.2
-        noise_sigma = random.uniform(2, 8) if add_noise else 0
+        noise_sigma = random.uniform(*self.noise_sigma_range) if add_noise else 0
 
         # Blur
-        add_blur = random.random() < 0.3
+        add_blur = self.enable_blur and random.random() < 0.3
         blur_kernel = random.choice([3, 5]) if add_blur else None
 
         # Apply to all frames

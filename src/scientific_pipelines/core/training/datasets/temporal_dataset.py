@@ -50,6 +50,7 @@ class BackyardWorldsTemporalDataset(Dataset):
         heatmap_size: Tuple[int, int] = (8, 8),
         input_size: Tuple[int, int] = (256, 256),
         class_names: List[str] = ['mover', 'dipole'],
+        apply_crop: bool = True,
     ):
         self.data_dir = Path(data_dir)
         self.annotations_path = Path(annotations_path)
@@ -58,6 +59,7 @@ class BackyardWorldsTemporalDataset(Dataset):
         self.input_size = input_size
         self.class_names = class_names
         self.num_classes = len(class_names)
+        self.apply_crop = apply_crop
 
         # Load annotations
         with open(self.annotations_path, 'r') as f:
@@ -93,7 +95,8 @@ class BackyardWorldsTemporalDataset(Dataset):
 
         # Parse annotations to get keypoints and labels
         keypoints, labels = self._parse_annotations(annotation, original_size)
-        keypoints, labels = adjust_keypoints(keypoints, labels, original_size)
+        if self.apply_crop:
+            keypoints, labels = adjust_keypoints(keypoints, labels, original_size)
 
         # Apply augmentation
         if self.transform is not None:
@@ -131,7 +134,9 @@ class BackyardWorldsTemporalDataset(Dataset):
             frames.append(frame)
 
         original_size = frames[0].shape[:2]
-        return crop_frames(frames), original_size
+        if self.apply_crop:
+            frames = crop_frames(frames)
+        return frames, original_size
 
     def _parse_annotations(
         self,
