@@ -44,6 +44,13 @@ def load_frames(frames_dir: Path, apply_crop: bool) -> Tuple[List[np.ndarray], T
     return frames, original_size
 
 
+def has_required_frames(frames_dir: Path) -> bool:
+    for i in range(4):
+        if not (frames_dir / f"frame_{i:02d}.jpg").exists():
+            return False
+    return True
+
+
 def load_annotations(annotations_path: Path) -> dict:
     if not annotations_path.exists():
         raise FileNotFoundError(f"Annotations file not found: {annotations_path}")
@@ -132,9 +139,20 @@ def iter_windows(
             yield left, top, right, bottom
 
 
-def to_tensor(frames: List[np.ndarray], normalize: bool, crop_size: Tuple[int, int]) -> torch.Tensor:
+def to_tensor(
+    frames: List[np.ndarray],
+    normalize: bool,
+    crop_size: Tuple[int, int],
+    threshold_low: bool,
+    threshold_value: int,
+) -> torch.Tensor:
     if normalize:
-        transform = TemporalSequenceAugmentation(input_size=crop_size, training=False)
+        transform = TemporalSequenceAugmentation(
+            input_size=crop_size,
+            training=False,
+            enable_threshold=threshold_low,
+            threshold_value=threshold_value,
+        )
         frames_tensor, _, _ = transform(frames, [], [])
         return frames_tensor
 
@@ -153,6 +171,8 @@ def build_score_map(
     device: str,
     any_object: bool,
     normalize: bool,
+    threshold_low: bool,
+    threshold_value: int,
     batch_size: int,
 ) -> np.ndarray:
     h, w = frames[0].shape[:2]
@@ -185,7 +205,13 @@ def build_score_map(
 
         for left, top, right, bottom in iter_windows((h, w), crop_size, stride):
             crop_frames = [f[top:bottom, left:right].copy() for f in frames]
-            crop_tensor = to_tensor(crop_frames, normalize, crop_size).unsqueeze(0)
+            crop_tensor = to_tensor(
+                crop_frames,
+                normalize,
+                crop_size,
+                threshold_low,
+                threshold_value,
+            ).unsqueeze(0)
             batch_tensors.append(crop_tensor)
             batch_windows.append((left, top, right, bottom))
             if len(batch_tensors) >= batch_size:
@@ -297,6 +323,8 @@ def main() -> None:
     parser.add_argument("--no-crop", action="store_true", help="Disable crop config for already-cropped frames")
     parser.add_argument("--any-object", action="store_true")
     parser.add_argument("--normalize", action="store_true", help="Apply ImageNet normalization")
+    parser.add_argument("--threshold-low", action="store_true", help="Apply grayscale thresholding")
+    parser.add_argument("--threshold-value", type=int, default=125, help="Grayscale threshold value")
     parser.add_argument("--base-channels", type=int, default=16)
     parser.add_argument("--batch-size", type=int, default=64, help="Batch size for window inference")
     parser.add_argument("--device", type=str, default="cuda" if torch.cuda.is_available() else "cpu")
@@ -367,6 +395,9 @@ def main() -> None:
     summary_rows = []
     for subject_id in subject_ids:
         frames_dir = subjects_dir / subject_id
+        if not has_required_frames(frames_dir):
+            print(f"Skipping {subject_id}: missing one or more frame_00..03.jpg files")
+            continue
         frames, original_size = load_frames(frames_dir, apply_crop=not args.no_crop)
         score_map = build_score_map(
             frames,
@@ -376,6 +407,8 @@ def main() -> None:
             args.device,
             args.any_object,
             args.normalize,
+            args.threshold_low,
+            args.threshold_value,
             args.batch_size,
         )
         annotation_boxes = None

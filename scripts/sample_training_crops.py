@@ -81,6 +81,20 @@ def main() -> None:
     parser.add_argument("--use-augmentation", action="store_true")
     parser.add_argument("--no-noise", action="store_true")
     parser.add_argument("--no-blur", action="store_true")
+    parser.add_argument("--noise-sigma-min", type=float, default=2.0, help="Min Gaussian noise sigma")
+    parser.add_argument("--noise-sigma-max", type=float, default=8.0, help="Max Gaussian noise sigma")
+    parser.add_argument("--noise-prob", type=float, default=0.2, help="Probability of noise augmentation")
+    parser.add_argument("--blur-prob", type=float, default=0.3, help="Probability of blur augmentation")
+    parser.add_argument("--denoise", action="store_true", help="Enable denoising augmentation")
+    parser.add_argument("--denoise-prob", type=float, default=0.1, help="Probability of denoising augmentation")
+    parser.add_argument("--denoise-strength", type=float, default=7.0, help="Denoising strength (NLMeans h)")
+    parser.add_argument("--adaptive-noise", action="store_true", help="Adapt noise to reach target sigma range")
+    parser.add_argument(
+        "--threshold-low",
+        action="store_true",
+        help="Zero out pixels below threshold before noise augmentation",
+    )
+    parser.add_argument("--threshold-value", type=int, default=125, help="Grayscale threshold value")
     parser.add_argument("--negative-bright-fraction", type=float, default=0.5)
     parser.add_argument("--negative-bright-percentile", type=float, default=85.0)
     parser.add_argument("--negative-bright-samples", type=int, default=200)
@@ -95,7 +109,16 @@ def main() -> None:
             input_size=args.crop_size,
             training=True,
             enable_noise=not args.no_noise,
+            noise_sigma_range=(args.noise_sigma_min, args.noise_sigma_max),
             enable_blur=not args.no_blur,
+            noise_prob=args.noise_prob,
+            blur_prob=args.blur_prob,
+            enable_denoise=args.denoise,
+            denoise_prob=args.denoise_prob,
+            denoise_strength=args.denoise_strength,
+            adaptive_noise=args.adaptive_noise,
+            enable_threshold=args.threshold_low,
+            threshold_value=args.threshold_value,
         )
         normalized = True
 

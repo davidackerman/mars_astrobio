@@ -25,6 +25,16 @@ class TemporalSequenceAugmentation:
         input_size: Target image size (height, width)
         training: If True, apply augmentations. If False, only resize + normalize
         enable_noise: If True, allow Gaussian noise during training augmentations
+        noise_prob: Probability of applying noise augmentation
+        noise_sigma_range: Range for Gaussian noise sigma (or target noise when adaptive)
+        enable_blur: If True, allow Gaussian blur during training augmentations
+        blur_prob: Probability of applying blur augmentation
+        enable_denoise: If True, allow denoising augmentation
+        denoise_prob: Probability of applying denoising augmentation
+        denoise_strength: Strength for denoising filter
+        adaptive_noise: If True, adapt noise strength to reach target range
+        enable_threshold: If True, zero out pixels below threshold before noise
+        threshold_value: Grayscale threshold for zeroing low-intensity pixels
     """
 
     def __init__(
@@ -34,12 +44,28 @@ class TemporalSequenceAugmentation:
         enable_noise: bool = True,
         noise_sigma_range: Tuple[float, float] = (2.0, 8.0),
         enable_blur: bool = True,
+        noise_prob: float = 0.2,
+        blur_prob: float = 0.3,
+        enable_denoise: bool = False,
+        denoise_prob: float = 0.1,
+        denoise_strength: float = 7.0,
+        adaptive_noise: bool = False,
+        enable_threshold: bool = False,
+        threshold_value: int = 125,
     ):
         self.input_size = input_size
         self.training = training
         self.enable_noise = enable_noise
         self.noise_sigma_range = noise_sigma_range
         self.enable_blur = enable_blur
+        self.noise_prob = noise_prob
+        self.blur_prob = blur_prob
+        self.enable_denoise = enable_denoise
+        self.denoise_prob = denoise_prob
+        self.denoise_strength = denoise_strength
+        self.adaptive_noise = adaptive_noise
+        self.enable_threshold = enable_threshold
+        self.threshold_value = threshold_value
 
         # ImageNet normalization (for ResNet pretrained weights)
         self.normalize = T.Normalize(
@@ -68,6 +94,8 @@ class TemporalSequenceAugmentation:
         """
         if not self.training:
             # Validation: only resize + normalize
+            if self.enable_threshold:
+                frames = [self._apply_threshold(f, self.threshold_value) for f in frames]
             frames_aug = [self._resize(f) for f in frames]
             keypoints_aug = self._resize_keypoints(keypoints, frames[0].shape[:2], self.input_size)
         else:
@@ -176,6 +204,8 @@ class TemporalSequenceAugmentation:
         frames_aug = []
 
         # Choose random augmentation parameters (same for all frames)
+        apply_threshold = self.enable_threshold
+
         # Brightness and contrast
         if random.random() < 0.7:
             alpha = random.uniform(0.8, 1.2)  # contrast
@@ -184,22 +214,51 @@ class TemporalSequenceAugmentation:
             alpha, beta = 1.0, 0.0
 
         # Gaussian noise (reduced to avoid overwhelming signal)
-        add_noise = self.enable_noise and random.random() < 0.2
-        noise_sigma = random.uniform(*self.noise_sigma_range) if add_noise else 0
+        add_noise = self.enable_noise and random.random() < self.noise_prob
+        if add_noise:
+            if self.adaptive_noise:
+                base_noise = self._estimate_noise_std(frames[0])
+                target_noise = random.uniform(*self.noise_sigma_range)
+                noise_sigma = max(0.0, target_noise - base_noise)
+                add_noise = noise_sigma > 0.0
+            else:
+                noise_sigma = random.uniform(*self.noise_sigma_range)
+        else:
+            noise_sigma = 0.0
 
         # Blur
-        add_blur = self.enable_blur and random.random() < 0.3
+        add_blur = self.enable_blur and random.random() < self.blur_prob
         blur_kernel = random.choice([3, 5]) if add_blur else None
+
+        # Denoise
+        add_denoise = self.enable_denoise and random.random() < self.denoise_prob
 
         # Apply to all frames
         for frame in frames:
+            frame_aug = frame
+
+            # Threshold low-intensity pixels before noise
+            if apply_threshold:
+                frame_aug = self._apply_threshold(frame_aug, self.threshold_value)
+
             # Brightness and contrast
-            frame_aug = cv2.convertScaleAbs(frame, alpha=alpha, beta=beta)
+            frame_aug = cv2.convertScaleAbs(frame_aug, alpha=alpha, beta=beta)
 
             # Gaussian noise
             if add_noise:
                 noise = np.random.normal(0, noise_sigma, frame_aug.shape).astype(np.int16)
                 frame_aug = np.clip(frame_aug.astype(np.int16) + noise, 0, 255).astype(np.uint8)
+
+            # Denoise (NLMeans for gentle cleanup)
+            if add_denoise:
+                frame_aug = cv2.fastNlMeansDenoisingColored(
+                    frame_aug,
+                    None,
+                    h=self.denoise_strength,
+                    hColor=self.denoise_strength,
+                    templateWindowSize=7,
+                    searchWindowSize=21,
+                )
 
             # Blur
             if add_blur:
@@ -208,6 +267,23 @@ class TemporalSequenceAugmentation:
             frames_aug.append(frame_aug)
 
         return frames_aug
+
+    @staticmethod
+    def _apply_threshold(frame: np.ndarray, threshold_value: int) -> np.ndarray:
+        """Zero out pixels with grayscale intensity below the threshold."""
+        gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
+        mask = gray >= threshold_value
+        frame_out = frame.copy()
+        frame_out[~mask] = 0
+        return frame_out
+
+    @staticmethod
+    def _estimate_noise_std(frame: np.ndarray) -> float:
+        """Estimate noise level via high-pass residual stddev."""
+        gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY).astype(np.float32)
+        blur = cv2.GaussianBlur(gray, (0, 0), 2.0)
+        resid = gray - blur
+        return float(np.std(resid))
 
     def _resize(self, frame: np.ndarray) -> np.ndarray:
         """Resize frame to target size."""
