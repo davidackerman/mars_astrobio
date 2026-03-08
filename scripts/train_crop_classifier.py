@@ -244,6 +244,8 @@ def train_fold(
     early_stopping_ema_alpha: float,
     checkpoint_dir: Optional[Path],
     checkpoint_every: int,
+    resample_each_epoch: bool,
+    resample_seed: int,
 ) -> Tuple[Dict[str, float], dict]:
     best_monitor = None
     best_metrics: Dict[str, float] = {}
@@ -255,6 +257,12 @@ def train_fold(
     minimize = early_stopping_metric in ("val_loss", "val_loss_ema")
 
     for epoch in range(num_epochs):
+        if resample_each_epoch:
+            dataset = train_loader.dataset
+            if isinstance(dataset, Subset):
+                dataset = dataset.dataset
+            if hasattr(dataset, "resample"):
+                dataset.resample(seed=resample_seed + epoch)
         model.train()
         train_loss = 0.0
         for batch in train_loader:
@@ -376,7 +384,29 @@ def main() -> None:
     parser.add_argument("--crop-size", type=parse_size, default=(128, 128), help="Crop size H,W")
     parser.add_argument("--samples-per-subject", type=int, default=50)
     parser.add_argument("--positive-fraction", type=float, default=0.5)
+    parser.add_argument(
+        "--sampling-mode",
+        choices=["random", "grid"],
+        default="random",
+        help="Sampling strategy for crop centers (grid matches sliding-window inference)",
+    )
+    parser.add_argument(
+        "--grid-stride",
+        type=int,
+        default=32,
+        help="Stride in pixels for grid sampling (sampling-mode=grid)",
+    )
+    parser.add_argument(
+        "--grid-max-samples-per-subject",
+        type=int,
+        default=0,
+        help="Cap grid samples per subject (0 = no cap)",
+    )
     parser.add_argument("--batch-size", type=int, default=16)
+    parser.add_argument("--num-workers", type=int, default=0)
+    parser.add_argument("--pin-memory", action="store_true")
+    parser.add_argument("--persistent-workers", action="store_true")
+    parser.add_argument("--prefetch-factor", type=int, default=2)
     parser.add_argument("--num-epochs", type=int, default=30)
     parser.add_argument("--lr", type=float, default=3e-4)
     parser.add_argument("--weight-decay", type=float, default=5e-4)
@@ -415,6 +445,11 @@ def main() -> None:
         help="Max jitter (dy,dx) for positive crop centers",
     )
     parser.add_argument(
+        "--resample-each-epoch",
+        action="store_true",
+        help="Resample crop centers each epoch (uses --seed as base)",
+    )
+    parser.add_argument(
         "--val-fraction",
         type=float,
         default=None,
@@ -425,6 +460,11 @@ def main() -> None:
         type=int,
         default=None,
         help="Use a single train/val split with this many subjects for validation",
+    )
+    parser.add_argument(
+        "--train-on-all",
+        action="store_true",
+        help="Train on all subjects and reuse the same set for validation metrics",
     )
     parser.add_argument("--early-stopping-patience", type=int, default=30, help="Epochs without val improvement")
     parser.add_argument("--early-stopping-delta", type=float, default=1e-3, help="Min metric delta to reset patience")
@@ -492,6 +532,11 @@ def main() -> None:
         default=0,
         help="Require mover crops to include at least this many frames (0 disables)",
     )
+    parser.add_argument(
+        "--movers-only",
+        action="store_true",
+        help="Ignore dipole annotations and train mover vs background only",
+    )
     args = parser.parse_args()
 
     logger.info("Command: %s", " ".join(sys.argv))
@@ -524,6 +569,13 @@ def main() -> None:
         threshold_value=args.threshold_value,
     )
 
+    grid_max = args.grid_max_samples_per_subject if args.grid_max_samples_per_subject > 0 else None
+    if args.sampling_mode == "grid":
+        logger.info("Grid sampling enabled; samples_per_subject/positive_fraction are ignored.")
+    if args.resample_each_epoch and args.balanced_sampling:
+        logger.warning("resample_each_epoch is disabled when balanced_sampling is enabled.")
+
+    class_names = ["mover"] if args.movers_only else ["mover", "dipole"]
     base_dataset = BackyardWorldsTemporalCropDataset(
         data_dir=args.data_dir,
         annotations_path=args.annotations_path,
@@ -538,6 +590,11 @@ def main() -> None:
         negative_bright_percentile=args.negative_bright_percentile,
         negative_bright_samples=args.negative_bright_samples,
         positive_mover_min_frames=args.positive_mover_min_frames,
+        class_names=class_names,
+        ignore_dipoles=args.movers_only,
+        sampling_mode=args.sampling_mode,
+        grid_stride=args.grid_stride,
+        grid_max_samples_per_subject=grid_max,
     )
 
     subject_map = build_subject_index_map(base_dataset.samples)
@@ -553,7 +610,13 @@ def main() -> None:
     use_single_split = args.val_fraction is not None or args.val_subjects is not None
     fold_metrics = []
     split_subject_ids = subject_ids
-    if use_single_split:
+    if args.train_on_all:
+        logger.info("Train-on-all enabled: using all subjects for train and validation metrics")
+        train_subjects = subject_ids[:]
+        val_subjects = subject_ids[:]
+        folds = [(0, None, train_subjects, val_subjects)]
+        use_single_split = True
+    elif use_single_split:
         rng = random.Random(args.seed)
         split_subject_ids = subject_ids[:]
         rng.shuffle(split_subject_ids)
@@ -608,6 +671,11 @@ def main() -> None:
             negative_bright_percentile=args.negative_bright_percentile,
             negative_bright_samples=args.negative_bright_samples,
             positive_mover_min_frames=args.positive_mover_min_frames,
+            class_names=class_names,
+            ignore_dipoles=args.movers_only,
+            sampling_mode=args.sampling_mode,
+            grid_stride=args.grid_stride,
+            grid_max_samples_per_subject=grid_max,
         )
         val_dataset = BackyardWorldsTemporalCropDataset(
             data_dir=args.data_dir,
@@ -624,6 +692,11 @@ def main() -> None:
             negative_bright_percentile=args.negative_bright_percentile,
             negative_bright_samples=args.negative_bright_samples,
             positive_mover_min_frames=args.positive_mover_min_frames,
+            class_names=class_names,
+            ignore_dipoles=args.movers_only,
+            sampling_mode=args.sampling_mode,
+            grid_stride=args.grid_stride,
+            grid_max_samples_per_subject=grid_max,
         )
 
         if args.balanced_sampling:
@@ -647,16 +720,24 @@ def main() -> None:
             batch_size=args.batch_size,
             shuffle=True,
             collate_fn=lambda batch: collate_fn(batch, any_object=args.any_object),
+            num_workers=args.num_workers,
+            pin_memory=args.pin_memory,
+            persistent_workers=args.persistent_workers,
+            prefetch_factor=args.prefetch_factor,
         )
         val_loader = DataLoader(
             Subset(val_dataset, val_indices),
             batch_size=args.batch_size,
             shuffle=False,
             collate_fn=lambda batch: collate_fn(batch, any_object=args.any_object),
+            num_workers=args.num_workers,
+            pin_memory=args.pin_memory,
+            persistent_workers=args.persistent_workers,
+            prefetch_factor=args.prefetch_factor,
         )
 
         model = TemporalCropClassifier(
-            num_classes=1 if args.any_object else 2,
+            num_classes=1 if (args.any_object or args.movers_only) else 2,
             base_channels=args.base_channels,
             dropout=args.dropout,
         ).to(args.device)
@@ -712,6 +793,8 @@ def main() -> None:
             args.early_stopping_ema_alpha,
             args.save_checkpoints if args.checkpoint_every > 0 else None,
             args.checkpoint_every,
+            resample_each_epoch=args.resample_each_epoch and not args.balanced_sampling,
+            resample_seed=args.seed + fold_idx,
         )
         fold_metrics.append(metrics)
         if args.save_checkpoints is not None:

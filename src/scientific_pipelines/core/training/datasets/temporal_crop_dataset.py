@@ -41,6 +41,10 @@ class BackyardWorldsTemporalCropDataset(Dataset):
             centers and any labeled object
         class_names: List of class names (default: ['mover', 'dipole'])
         seed: Random seed for crop sampling
+        sampling_mode: "random" for random positive/negative sampling,
+            "grid" for sliding-window style sampling over each subject
+        grid_stride: Stride (pixels) for grid sampling mode
+        grid_max_samples_per_subject: Cap grid samples per subject (None or 0 = no cap)
     """
 
     def __init__(
@@ -61,6 +65,11 @@ class BackyardWorldsTemporalCropDataset(Dataset):
         negative_bright_percentile: float = 85.0,
         negative_bright_samples: int = 200,
         positive_mover_min_frames: int = 0,
+        lazy_brightness: bool = False,
+        ignore_dipoles: bool = False,
+        sampling_mode: str = "random",
+        grid_stride: Optional[int] = None,
+        grid_max_samples_per_subject: Optional[int] = None,
     ):
         self.data_dir = Path(data_dir)
         self.annotations_path = Path(annotations_path)
@@ -77,7 +86,15 @@ class BackyardWorldsTemporalCropDataset(Dataset):
         self.negative_bright_percentile = negative_bright_percentile
         self.negative_bright_samples = negative_bright_samples
         self.positive_mover_min_frames = positive_mover_min_frames
+        self.lazy_brightness = lazy_brightness
+        self.ignore_dipoles = ignore_dipoles
+        self.sampling_mode = sampling_mode
+        self.grid_stride = grid_stride
+        self.grid_max_samples_per_subject = grid_max_samples_per_subject
+        self.seed = seed
         self._rng = random.Random(seed)
+        # Cache brightest centers for bright-negative sampling.
+        self._brightest_centers: Dict[str, Optional[Tuple[float, float]]] = {}
 
         with open(self.annotations_path, 'r') as f:
             self.annotations = json.load(f)
@@ -99,10 +116,24 @@ class BackyardWorldsTemporalCropDataset(Dataset):
         ) = self._load_subject_sizes()
         if self.apply_crop:
             self._adjust_tracks_for_crop()
+        if self.sampling_mode not in ("random", "grid"):
+            raise ValueError(f"sampling_mode must be 'random' or 'grid', got {self.sampling_mode!r}")
+        if self.sampling_mode == "grid" and (self.grid_stride is None or self.grid_stride <= 0):
+            raise ValueError("grid_stride must be set to a positive integer when sampling_mode='grid'")
+
         self.samples = samples if samples is not None else self._build_samples()
 
         logger.info("Loaded %d annotated sequences", len(self.subject_ids))
         logger.info("Generated %d crop samples", len(self.samples))
+
+    def resample(self, seed: Optional[int] = None) -> None:
+        """Regenerate crop samples using a new random seed."""
+        if seed is None:
+            self.seed += 1
+        else:
+            self.seed = seed
+        self._rng = random.Random(self.seed)
+        self.samples = self._build_samples()
 
     def __len__(self) -> int:
         return len(self.samples)
@@ -143,6 +174,8 @@ class BackyardWorldsTemporalCropDataset(Dataset):
         }
 
     def _build_samples(self) -> List[Dict]:
+        if self.sampling_mode == "grid":
+            return self._build_grid_samples()
         samples = []
         for subject_id in self.subject_ids:
             keypoints, labels = self.subject_keypoints[subject_id]
@@ -189,6 +222,34 @@ class BackyardWorldsTemporalCropDataset(Dataset):
                 })
 
         return samples
+
+    def _build_grid_samples(self) -> List[Dict]:
+        samples = []
+        for subject_id in self.subject_ids:
+            image_size = self.subject_sizes[subject_id]
+            centers = list(self._iter_grid_centers(image_size))
+            if self.grid_max_samples_per_subject and self.grid_max_samples_per_subject > 0:
+                if len(centers) > self.grid_max_samples_per_subject:
+                    centers = self._rng.sample(centers, self.grid_max_samples_per_subject)
+            for center in centers:
+                samples.append({
+                    'subject_id': subject_id,
+                    'center': center,
+                })
+        return samples
+
+    def _iter_grid_centers(
+        self,
+        image_size: Tuple[int, int],
+    ):
+        h, w = image_size
+        crop_h, crop_w = self.crop_size
+        stride = int(self.grid_stride or 1)
+        max_top = max(1, h - crop_h + 1)
+        max_left = max(1, w - crop_w + 1)
+        for top in range(0, max_top, stride):
+            for left in range(0, max_left, stride):
+                yield (left + crop_w / 2.0, top + crop_h / 2.0)
 
     def _jitter_positive_center(
         self,
@@ -249,12 +310,13 @@ class BackyardWorldsTemporalCropDataset(Dataset):
                 frame = frame[top:bottom, left:right]
             else:
                 sizes[subject_id] = (h, w)
-            gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY).astype(np.float32)
-            brightness_integrals[subject_id] = cv2.integral(gray)
-            bright_thresholds[subject_id] = self._estimate_bright_threshold(
-                brightness_integrals[subject_id],
-                sizes[subject_id],
-            )
+            if not self.lazy_brightness:
+                gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY).astype(np.float32)
+                brightness_integrals[subject_id] = cv2.integral(gray)
+                bright_thresholds[subject_id] = self._estimate_bright_threshold(
+                    brightness_integrals[subject_id],
+                    sizes[subject_id],
+                )
         return sizes, original_sizes, brightness_integrals, bright_thresholds
 
     def _estimate_bright_threshold(
@@ -293,6 +355,8 @@ class BackyardWorldsTemporalCropDataset(Dataset):
         integral = self.subject_brightness_integrals.get(subject_id)
         threshold = self.subject_bright_thresholds.get(subject_id, 0.0)
         if integral is None:
+            integral, threshold = self._ensure_subject_brightness(subject_id, image_size)
+        if integral is None:
             return self._sample_negative_center(keypoints, image_size)
 
         h, w = image_size
@@ -300,6 +364,11 @@ class BackyardWorldsTemporalCropDataset(Dataset):
         half_h = crop_h // 2
         half_w = crop_w // 2
         min_dist_sq = self.min_negative_distance ** 2
+
+        if self._rng.random() < 0.5:
+            brightest_center = self._find_brightest_center(subject_id, keypoints, image_size)
+            if brightest_center is not None:
+                return brightest_center
 
         for _ in range(100):
             cx = self._rng.uniform(half_w, w - half_w)
@@ -311,6 +380,85 @@ class BackyardWorldsTemporalCropDataset(Dataset):
                 return (cx, cy)
 
         return self._sample_negative_center(keypoints, image_size)
+
+    def _find_brightest_center(
+        self,
+        subject_id: str,
+        keypoints: List[Tuple[float, float]],
+        image_size: Tuple[int, int],
+    ) -> Optional[Tuple[float, float]]:
+        if subject_id in self._brightest_centers:
+            return self._brightest_centers[subject_id]
+
+        gray = self._load_subject_gray(subject_id)
+        if gray is None:
+            self._brightest_centers[subject_id] = None
+            return None
+
+        h, w = gray.shape[:2]
+        crop_h, crop_w = self.crop_size
+        half_h = crop_h // 2
+        half_w = crop_w // 2
+        min_dist_sq = self.min_negative_distance ** 2
+
+        flat_idx = int(np.argmax(gray))
+        cy, cx = divmod(flat_idx, w)
+        cx = float(np.clip(cx, half_w, w - half_w))
+        cy = float(np.clip(cy, half_h, h - half_h))
+
+        if keypoints and not all(
+            ((cx - x) ** 2 + (cy - y) ** 2) >= min_dist_sq for x, y in keypoints
+        ):
+            self._brightest_centers[subject_id] = None
+            return None
+
+        center = (cx, cy)
+        self._brightest_centers[subject_id] = center
+        return center
+
+    def _ensure_subject_brightness(
+        self,
+        subject_id: str,
+        image_size: Tuple[int, int],
+    ) -> Tuple[Optional[np.ndarray], float]:
+        integral = self.subject_brightness_integrals.get(subject_id)
+        threshold = self.subject_bright_thresholds.get(subject_id, 0.0)
+        if integral is not None:
+            return integral, threshold
+
+        frames_dir = self.data_dir / "subjects_groundtruth" / subject_id
+        frame_path = frames_dir / "frame_00.jpg"
+        if not frame_path.exists():
+            return None, 0.0
+        frame = cv2.imread(str(frame_path))
+        if frame is None:
+            return None, 0.0
+        if self.apply_crop:
+            left, top, right, bottom = crop_bounds(frame.shape[:2])
+            frame = frame[top:bottom, left:right]
+        gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY).astype(np.float32)
+        integral = cv2.integral(gray)
+        threshold = self._estimate_bright_threshold(integral, image_size)
+        self.subject_brightness_integrals[subject_id] = integral
+        self.subject_bright_thresholds[subject_id] = threshold
+        return integral, threshold
+
+    def _load_subject_gray(self, subject_id: str) -> Optional[np.ndarray]:
+        frames_dir = self.data_dir / "subjects_groundtruth" / subject_id
+        frame_path = frames_dir / "frame_00.jpg"
+        if not frame_path.exists():
+            return None
+        frame = cv2.imread(str(frame_path))
+        if frame is None:
+            return None
+        if self.apply_crop:
+            left, top, right, bottom = crop_bounds(frame.shape[:2])
+            frame = frame[top:bottom, left:right]
+        return cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
+
+    def ensure_subject_brightness(self, subject_id: str) -> Tuple[Optional[np.ndarray], float]:
+        image_size = self.subject_sizes[subject_id]
+        return self._ensure_subject_brightness(subject_id, image_size)
 
     def _parse_annotations(
         self,
@@ -326,10 +474,11 @@ class BackyardWorldsTemporalCropDataset(Dataset):
             labels.append(0)
 
         dipole_boxes = annotation.get("dipole_circles", [])
-        for box in dipole_boxes:
-            x, y, w, h = box
-            keypoints.append((x + w / 2, y + h / 2))
-            labels.append(1)
+        if not self.ignore_dipoles:
+            for box in dipole_boxes:
+                x, y, w, h = box
+                keypoints.append((x + w / 2, y + h / 2))
+                labels.append(1)
 
         return keypoints, labels
 

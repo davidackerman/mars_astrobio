@@ -5,6 +5,7 @@ Sample training crops and save them as GIFs, grouped by category.
 
 import argparse
 import csv
+import logging
 from pathlib import Path
 from typing import Dict, List, Tuple
 
@@ -19,6 +20,8 @@ from scientific_pipelines.core.training.datasets import TemporalSequenceAugmenta
 from scientific_pipelines.core.training.datasets.temporal_crop_dataset import (
     BackyardWorldsTemporalCropDataset,
 )
+
+logger = logging.getLogger(__name__)
 
 
 def parse_size(value: str) -> Tuple[int, int]:
@@ -56,8 +59,7 @@ def classify_sample(
             return "object_dipole", 0.0, 0.0
         return "object_other", 0.0, 0.0
 
-    integral = dataset.subject_brightness_integrals.get(subject_id)
-    threshold = dataset.subject_bright_thresholds.get(subject_id, 0.0)
+    integral, threshold = dataset.ensure_subject_brightness(subject_id)
     image_size = dataset.subject_sizes[subject_id]
     if integral is None:
         return "background", 0.0, threshold
@@ -100,11 +102,18 @@ def main() -> None:
     parser.add_argument("--negative-bright-samples", type=int, default=200)
     parser.add_argument("--num-per-class", type=int, default=50)
     parser.add_argument("--gif-duration", type=float, default=0.8)
+    parser.add_argument("--lazy-brightness", action="store_true")
     args = parser.parse_args()
+
+    logging.basicConfig(
+        level=logging.INFO,
+        format="%(asctime)s - %(levelname)s - %(message)s",
+    )
 
     transform = None
     normalized = False
     if args.use_augmentation:
+        logger.info("Using training augmentations")
         transform = TemporalSequenceAugmentation(
             input_size=args.crop_size,
             training=True,
@@ -122,6 +131,7 @@ def main() -> None:
         )
         normalized = True
 
+    logger.info("Loading dataset from %s", args.data_dir)
     dataset = BackyardWorldsTemporalCropDataset(
         data_dir=args.data_dir,
         annotations_path=args.annotations_path,
@@ -135,6 +145,7 @@ def main() -> None:
         negative_bright_fraction=args.negative_bright_fraction,
         negative_bright_percentile=args.negative_bright_percentile,
         negative_bright_samples=args.negative_bright_samples,
+        lazy_brightness=args.lazy_brightness,
     )
 
     categories = [
@@ -150,6 +161,7 @@ def main() -> None:
     for category in categories:
         (args.out_dir / category).mkdir(parents=True, exist_ok=True)
 
+    logger.info("Sampling up to %d crops per category", args.num_per_class)
     rows = []
     for idx in range(len(dataset)):
         sample = dataset[idx]
@@ -185,6 +197,8 @@ def main() -> None:
         )
         counts[category] += 1
 
+        logger.info("Saved %d samples so far", sum(counts.values()))
+
     csv_path = args.out_dir / "crop_sample_index.csv"
     with csv_path.open("w", newline="") as f:
         writer = csv.DictWriter(
@@ -205,7 +219,7 @@ def main() -> None:
         writer.writerows(rows)
 
     summary = ", ".join(f"{k}={v}" for k, v in counts.items())
-    print(f"Saved samples to {args.out_dir} ({summary})")
+    logger.info("Saved samples to %s (%s)", args.out_dir, summary)
 
 
 if __name__ == "__main__":
