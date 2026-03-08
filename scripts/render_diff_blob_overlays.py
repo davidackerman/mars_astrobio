@@ -136,16 +136,28 @@ def _load_dipoles(path: Path) -> Dict[str, List[Tuple[int, float, float]]]:
 
 
 def _color_for_id(item_id: int) -> Tuple[int, int, int]:
+    # Wider set of bases emphasizing reds/oranges/blues and some greens/purples
     palette = [
-        (0, 255, 255),
+        (255, 90, 60),
+        (255, 140, 60),
         (255, 180, 0),
-        (0, 200, 0),
-        (255, 0, 120),
+        (255, 100, 140),
         (0, 160, 255),
+        (0, 200, 255),
+        (40, 120, 255),
         (200, 0, 255),
-        (0, 255, 120),
+        (0, 255, 140),
+        (0, 255, 255),
     ]
-    return palette[item_id % len(palette)]
+    base = palette[item_id % len(palette)]
+    # deterministic small per-id variation so similar IDs still look related
+    r_off = ((item_id * 97) % 61) - 30
+    g_off = ((item_id * 53) % 41) - 20
+    b_off = ((item_id * 71) % 51) - 25
+    r = max(0, min(255, base[0] + r_off))
+    g = max(0, min(255, base[1] + g_off))
+    b = max(0, min(255, base[2] + b_off))
+    return (int(r), int(g), int(b))
 
 
 def _draw_detections(

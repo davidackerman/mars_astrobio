@@ -9,8 +9,10 @@ and dipoles in Backyard Worlds temporal sequences.
 import argparse
 import copy
 import logging
+import sys
 from pathlib import Path
 from typing import Dict, List
+from datetime import datetime
 
 import torch
 import torch.nn as nn
@@ -18,12 +20,17 @@ from torch.utils.data import DataLoader, Subset, ConcatDataset
 from torch.utils.tensorboard import SummaryWriter
 from tqdm import tqdm
 import numpy as np
+import torchvision
 
 # Add src to path
 import sys
 sys.path.insert(0, str(Path(__file__).parent.parent / 'src'))
 
-from scientific_pipelines.core.training.models import TemporalObjectDetector
+from scientific_pipelines.core.training.models import (
+    TemporalObjectDetector,
+    FrameStackObjectDetector,
+    DiffStreamObjectDetector,
+)
 from scientific_pipelines.core.training.losses import DetectionLoss
 from scientific_pipelines.core.training.datasets import (
     BackyardWorldsTemporalDataset,
@@ -33,6 +40,13 @@ from scientific_pipelines.core.training.metrics import DetectionMetrics
 
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
 logger = logging.getLogger(__name__)
+
+
+def parse_size(value: str) -> tuple:
+    parts = value.split(',')
+    if len(parts) != 2:
+        raise argparse.ArgumentTypeError("size must be H,W")
+    return int(parts[0]), int(parts[1])
 
 
 def collate_fn(batch):
@@ -92,6 +106,8 @@ class LOOCVTrainer:
         augmentation_multiplier: int = 50,
         checkpoint_dir: Path = Path("checkpoints"),
         log_dir: Path = Path("logs"),
+        score_threshold: float = 0.1,
+        log_heatmaps: bool = True,
     ):
         self.model = model
         self.loss_fn = loss_fn
@@ -103,6 +119,8 @@ class LOOCVTrainer:
         self.augmentation_multiplier = augmentation_multiplier
         self.checkpoint_dir = Path(checkpoint_dir)
         self.checkpoint_dir.mkdir(parents=True, exist_ok=True)
+        self.score_threshold = score_threshold
+        self.log_heatmaps = log_heatmaps
 
         # Create TensorBoard writer
         self.log_dir = Path(log_dir)
@@ -125,10 +143,11 @@ class LOOCVTrainer:
         train_loader: DataLoader,
         val_loader: DataLoader,
         fold_idx: int,
+        label: str = "Fold",
     ) -> Dict:
         """Train one LOOCV fold."""
         logger.info(f"\n{'='*60}")
-        logger.info(f"Training Fold {fold_idx + 1}")
+        logger.info(f"Training {label} {fold_idx + 1}")
         logger.info(f"{'='*60}")
 
         # Create TensorBoard writer for this fold
@@ -138,14 +157,14 @@ class LOOCVTrainer:
         best_val_metrics = {}
         best_model_state = None
         patience_counter = 0
-        patience = 20
+        patience = 100
 
         for epoch in range(self.num_epochs):
             # Training
             train_loss, train_loss_dict = self._train_epoch(train_loader)
 
             # Validation
-            val_loss, val_loss_dict, val_metrics = self._validate_epoch(val_loader)
+            val_loss, val_loss_dict, val_metrics, val_heatmap_max = self._validate_epoch(val_loader, epoch)
 
             # Learning rate scheduling
             self.scheduler.step(val_loss)
@@ -163,13 +182,14 @@ class LOOCVTrainer:
             self.writer.add_scalar('LearningRate', self.optimizer.param_groups[0]['lr'], epoch)
 
             # Logging
-            if epoch % 10 == 0 or epoch == self.num_epochs - 1:
+            if epoch % 5 == 0 or epoch == self.num_epochs - 1:
                 logger.info(
                     f"Epoch {epoch:03d}/{self.num_epochs}: "
                     f"Train Loss={train_loss:.4f} | "
                     f"Val Loss={val_loss:.4f} | "
                     f"Val F1={val_metrics['det_f1']:.3f} | "
-                    f"Val KeypointErr={val_metrics['keypoint_error']:.2f}px"
+                    f"Val KeypointErr={val_metrics['keypoint_error']:.2f}px | "
+                    f"HeatmapMax={val_heatmap_max:.3f}"
                 )
 
             # Save best model
@@ -244,15 +264,18 @@ class LOOCVTrainer:
 
         return avg_loss, avg_loss_dict
 
-    def _validate_epoch(self, val_loader: DataLoader) -> tuple:
+    def _validate_epoch(self, val_loader: DataLoader, epoch: int) -> tuple:
         """Validate for one epoch."""
         self.model.eval()
         total_loss = 0.0
         total_loss_dict = {'loss_cls': 0.0, 'loss_heatmap': 0.0}
         num_batches = 0
+        heatmap_max = 0.0
 
         all_predictions = []
         all_targets = []
+
+        logged_heatmaps = False
 
         with torch.no_grad():
             for batch in val_loader:
@@ -273,9 +296,22 @@ class LOOCVTrainer:
                 for key in total_loss_dict:
                     total_loss_dict[key] += loss_dict[key]
                 num_batches += 1
+                heatmap_max = max(heatmap_max, float(torch.sigmoid(heatmaps).max().item()))
 
                 # Decode predictions for metrics
-                decoded_preds = self.model.decode_predictions(class_logits, heatmaps)
+                decoded_preds = self.model.decode_predictions(
+                    class_logits,
+                    heatmaps,
+                    score_threshold=self.score_threshold,
+                )
+
+                if (
+                    self.writer is not None
+                    and self.log_heatmaps
+                    and not logged_heatmaps
+                ):
+                    self._log_heatmaps(frames, heatmap_targets, heatmaps, epoch)
+                    logged_heatmaps = True
 
                 # Prepare targets for metrics
                 for i in range(len(batch['sequence_id'])):
@@ -293,7 +329,27 @@ class LOOCVTrainer:
         # Compute metrics
         metrics = self.metrics_fn.compute_metrics(all_predictions, all_targets)
 
-        return avg_loss, avg_loss_dict, metrics
+        return avg_loss, avg_loss_dict, metrics, heatmap_max
+
+    def _log_heatmaps(
+        self,
+        frames: torch.Tensor,
+        heatmap_targets: torch.Tensor,
+        heatmaps: torch.Tensor,
+        epoch: int,
+    ) -> None:
+        """Log a single validation sample's frames and heatmaps to TensorBoard."""
+        frames_cpu = frames[0].detach().cpu()  # (T, C, H, W)
+        target_maps = heatmap_targets[0].detach().cpu()  # (C, H', W')
+        pred_maps = torch.sigmoid(heatmaps[0]).detach().cpu()
+
+        frame_grid = torchvision.utils.make_grid(frames_cpu, nrow=frames_cpu.shape[0])
+        self.writer.add_image("Samples/frames", frame_grid, epoch)
+
+        target_grid = torchvision.utils.make_grid(target_maps.unsqueeze(1), nrow=target_maps.shape[0])
+        pred_grid = torchvision.utils.make_grid(pred_maps.unsqueeze(1), nrow=pred_maps.shape[0])
+        self.writer.add_image("Samples/heatmap_targets", target_grid, epoch)
+        self.writer.add_image("Samples/heatmap_preds", pred_grid, epoch)
 
     def cross_validate(self, full_dataset: BackyardWorldsTemporalDataset) -> Dict:
         """Run full leave-one-out cross-validation."""
@@ -391,6 +447,34 @@ def main():
         help="Data directory containing subjects_groundtruth/"
     )
     parser.add_argument(
+        "--synthetic",
+        action="store_true",
+        help="Use synthetic ground truth data directory",
+    )
+    parser.add_argument(
+        "--no-crop",
+        action="store_true",
+        help="Disable crop config for already-cropped frames",
+    )
+    parser.add_argument(
+        "--val-fraction",
+        type=float,
+        default=None,
+        help="Use a single train/val split with this fraction of subjects for validation",
+    )
+    parser.add_argument(
+        "--val-subjects",
+        type=int,
+        default=None,
+        help="Use a single train/val split with this many subjects for validation",
+    )
+    parser.add_argument(
+        "--seed",
+        type=int,
+        default=0,
+        help="Random seed for train/val split shuffling",
+    )
+    parser.add_argument(
         "--checkpoint-dir",
         type=Path,
         default=Path("checkpoints/temporal_detector"),
@@ -401,6 +485,18 @@ def main():
         type=int,
         default=100,
         help="Number of epochs per fold"
+    )
+    parser.add_argument(
+        "--input-size",
+        type=parse_size,
+        default=(256, 256),
+        help="Input size H,W",
+    )
+    parser.add_argument(
+        "--heatmap-size",
+        type=parse_size,
+        default=(8, 8),
+        help="Heatmap size H,W",
     )
     parser.add_argument(
         "--aug-multiplier",
@@ -420,11 +516,75 @@ def main():
         default=Path("logs/temporal_detector"),
         help="Directory for TensorBoard logs"
     )
+    parser.add_argument(
+        "--model",
+        type=str,
+        choices=["temporal", "framestack", "diff"],
+        default="temporal",
+        help="Model variant to train"
+    )
+    parser.add_argument(
+        "--score-threshold",
+        type=float,
+        default=0.1,
+        help="Heatmap peak score threshold for decoding detections"
+    )
+    parser.add_argument(
+        "--alpha-heatmap",
+        type=float,
+        default=5.0,
+        help="Heatmap loss weight"
+    )
+    parser.add_argument(
+        "--log-heatmaps",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help="Log heatmap targets/predictions to TensorBoard"
+    )
+    parser.add_argument(
+        "--any-object",
+        action="store_true",
+        help="Collapse mover/dipole into a single class",
+    )
+    parser.add_argument(
+        "--no-augmentation",
+        action="store_true",
+        help="Disable training augmentations",
+    )
+    parser.add_argument(
+        "--no-noise",
+        action="store_true",
+        help="Disable Gaussian noise augmentation",
+    )
+    parser.add_argument("--noise-sigma-min", type=float, default=2.0, help="Min Gaussian noise sigma")
+    parser.add_argument("--noise-sigma-max", type=float, default=8.0, help="Max Gaussian noise sigma")
+    parser.add_argument("--noise-prob", type=float, default=0.2, help="Probability of noise augmentation")
+    parser.add_argument("--no-blur", action="store_true", help="Disable blur augmentation")
+    parser.add_argument("--blur-prob", type=float, default=0.3, help="Probability of blur augmentation")
+    parser.add_argument("--denoise", action="store_true", help="Enable denoising augmentation")
+    parser.add_argument("--denoise-prob", type=float, default=0.1, help="Probability of denoising augmentation")
+    parser.add_argument("--denoise-strength", type=float, default=7.0, help="Denoising strength (NLMeans h)")
+    parser.add_argument("--adaptive-noise", action="store_true", help="Adapt noise to reach target sigma range")
+    parser.add_argument(
+        "--threshold-low",
+        action="store_true",
+        help="Zero out pixels below threshold before noise augmentation",
+    )
+    parser.add_argument("--threshold-value", type=int, default=125, help="Grayscale threshold value")
 
     args = parser.parse_args()
 
+    logger.info("Command: %s", " ".join(sys.argv))
+
+    if args.synthetic:
+        args.data_dir = Path("data/backyard_worlds/synthetic_ground_truth")
+
     logger.info(f"Device: {args.device}")
     logger.info(f"Data directory: {args.data_dir}")
+    run_id = f"{args.model}_run_{datetime.now().strftime('%Y%m%d_%H%M%S')}"
+    args.checkpoint_dir = args.checkpoint_dir / args.model / run_id
+    args.log_dir = args.log_dir / args.model / run_id
+
     logger.info(f"Checkpoint directory: {args.checkpoint_dir}")
     logger.info(f"TensorBoard log directory: {args.log_dir}")
 
@@ -440,35 +600,70 @@ def main():
     annotations_path = args.data_dir / "annotations.json"
 
     # Training dataset with augmentation
-    train_transform = TemporalSequenceAugmentation(
-        input_size=(256, 256),
-        training=True
-    )
+    if args.no_augmentation:
+        train_transform = TemporalSequenceAugmentation(
+            input_size=args.input_size,
+            training=False,
+        )
+    else:
+        train_transform = TemporalSequenceAugmentation(
+            input_size=args.input_size,
+            training=True,
+            enable_noise=not args.no_noise,
+            noise_sigma_range=(args.noise_sigma_min, args.noise_sigma_max),
+            enable_blur=not args.no_blur,
+            noise_prob=args.noise_prob,
+            blur_prob=args.blur_prob,
+            enable_denoise=args.denoise,
+            denoise_prob=args.denoise_prob,
+            denoise_strength=args.denoise_strength,
+            adaptive_noise=args.adaptive_noise,
+            enable_threshold=args.threshold_low,
+            threshold_value=args.threshold_value,
+        )
 
+    class_names = ['object'] if args.any_object else ['mover', 'dipole']
     train_dataset = BackyardWorldsTemporalDataset(
         data_dir=args.data_dir,
         annotations_path=annotations_path,
         transform=train_transform,
-        heatmap_size=(8, 8),
-        input_size=(256, 256),
+        heatmap_size=args.heatmap_size,
+        input_size=args.input_size,
+        apply_crop=not args.no_crop,
+        class_names=class_names,
     )
 
     logger.info(f"Loaded {len(train_dataset)} annotated sequences")
 
     # Create model
-    model = TemporalObjectDetector(
-        num_classes=2,
-        pretrained=True,
-        freeze_backbone=True,
-        heatmap_size=(8, 8),
-    ).to(args.device)
+    if args.model == "framestack":
+        model = FrameStackObjectDetector(
+            num_classes=len(class_names),
+            pretrained=True,
+            freeze_backbone=True,
+            heatmap_size=args.heatmap_size,
+        ).to(args.device)
+    elif args.model == "diff":
+        model = DiffStreamObjectDetector(
+            num_classes=len(class_names),
+            pretrained=True,
+            freeze_backbone=True,
+            heatmap_size=args.heatmap_size,
+        ).to(args.device)
+    else:
+        model = TemporalObjectDetector(
+            num_classes=len(class_names),
+            pretrained=True,
+            freeze_backbone=True,
+            heatmap_size=args.heatmap_size,
+        ).to(args.device)
 
     logger.info(f"Model created with {sum(p.numel() for p in model.parameters() if p.requires_grad):,} trainable parameters")
 
     # Create loss function
     loss_fn = DetectionLoss(
         alpha_cls=1.0,
-        alpha_heatmap=2.0,
+        alpha_heatmap=args.alpha_heatmap,
         focal_alpha=0.25,
         focal_gamma=2.0,
     )
@@ -503,20 +698,74 @@ def main():
         augmentation_multiplier=args.aug_multiplier,
         checkpoint_dir=args.checkpoint_dir,
         log_dir=args.log_dir,
+        score_threshold=args.score_threshold,
+        log_heatmaps=args.log_heatmaps,
     )
 
-    # Run cross-validation
-    avg_metrics = trainer.cross_validate(train_dataset)
+    use_single_split = args.val_fraction is not None or args.val_subjects is not None
+    if use_single_split:
+        subject_ids = train_dataset.subject_ids[:]
+        rng = np.random.default_rng(args.seed)
+        rng.shuffle(subject_ids)
+        if args.val_subjects is not None:
+            num_val = max(1, min(args.val_subjects, len(subject_ids) - 1))
+        else:
+            num_val = max(1, int(round(len(subject_ids) * args.val_fraction)))
 
-    # Save final results
-    results_path = args.checkpoint_dir / "cv_results.txt"
-    with open(results_path, 'w') as f:
-        f.write("Leave-One-Out Cross-Validation Results\n")
-        f.write("="*60 + "\n")
-        for key, value in avg_metrics.items():
-            f.write(f"{key}: {value:.4f}\n")
+        val_subjects = set(subject_ids[:num_val])
+        train_subjects = [sid for sid in subject_ids if sid not in val_subjects]
+        logger.info("Single split: %d train subjects, %d val subjects", len(train_subjects), len(val_subjects))
 
-    logger.info(f"Results saved to {results_path}")
+        subject_to_index = {sid: idx for idx, sid in enumerate(train_dataset.subject_ids)}
+        train_indices = [subject_to_index[sid] for sid in train_subjects]
+        val_indices = [subject_to_index[sid] for sid in val_subjects]
+
+        train_subset = Subset(train_dataset, train_indices)
+        val_subset = Subset(train_dataset, val_indices)
+        train_dataset_aug = ConcatDataset([train_subset] * trainer.augmentation_multiplier)
+
+        train_loader = DataLoader(
+            train_dataset_aug,
+            batch_size=4,
+            shuffle=True,
+            num_workers=2,
+            pin_memory=(args.device == "cuda"),
+            collate_fn=collate_fn,
+        )
+        val_loader = DataLoader(
+            val_subset,
+            batch_size=1,
+            shuffle=False,
+            num_workers=0,
+            collate_fn=collate_fn,
+        )
+
+        logger.info(
+            "Training on %d samples, validating on %d samples",
+            len(train_dataset_aug),
+            len(val_subset),
+        )
+        metrics = trainer.train_fold(train_loader, val_loader, fold_idx=0, label="Run")
+        results_path = args.checkpoint_dir / "train_val_results.txt"
+        with open(results_path, 'w') as f:
+            f.write("Train/Val Results\n")
+            f.write("=" * 60 + "\n")
+            for key, value in metrics.items():
+                f.write(f"{key}: {value:.4f}\n")
+        logger.info(f"Results saved to {results_path}")
+    else:
+        # Run cross-validation
+        avg_metrics = trainer.cross_validate(train_dataset)
+
+        # Save final results
+        results_path = args.checkpoint_dir / "cv_results.txt"
+        with open(results_path, 'w') as f:
+            f.write("Leave-One-Out Cross-Validation Results\n")
+            f.write("="*60 + "\n")
+            for key, value in avg_metrics.items():
+                f.write(f"{key}: {value:.4f}\n")
+
+        logger.info(f"Results saved to {results_path}")
     logger.info(f"\nTo view training logs in TensorBoard, run:")
     logger.info(f"  tensorboard --logdir {args.log_dir}")
 

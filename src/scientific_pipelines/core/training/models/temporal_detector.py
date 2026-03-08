@@ -11,6 +11,27 @@ import torch.nn.functional as F
 import torchvision
 
 
+def _adapt_first_conv(conv: nn.Conv2d, in_channels: int) -> nn.Conv2d:
+    """Create a new conv layer with a different input channel count."""
+    new_conv = nn.Conv2d(
+        in_channels,
+        conv.out_channels,
+        kernel_size=conv.kernel_size,
+        stride=conv.stride,
+        padding=conv.padding,
+        bias=conv.bias is not None,
+    )
+
+    with torch.no_grad():
+        avg_weight = conv.weight.mean(dim=1, keepdim=True)
+        new_weight = avg_weight.repeat(1, in_channels, 1, 1)
+        new_conv.weight.copy_(new_weight)
+        if conv.bias is not None:
+            new_conv.bias.copy_(conv.bias)
+
+    return new_conv
+
+
 class TemporalObjectDetector(nn.Module):
     """
     Hybrid 2D+3D detector for multi-label temporal keypoint detection.
@@ -220,6 +241,149 @@ class TemporalObjectDetector(nn.Module):
         peak_scores = heatmap[peaks_mask]
 
         return [(y, x, score) for (y, x), score in zip(peak_coords, peak_scores)]
+
+
+class FrameStackObjectDetector(nn.Module):
+    """2D CNN detector using 4-frame channel stacking (12-channel input)."""
+
+    def __init__(
+        self,
+        num_classes: int = 2,
+        pretrained: bool = True,
+        freeze_backbone: bool = True,
+        heatmap_size: tuple[int, int] = (8, 8),
+        in_channels: int = 12,
+    ):
+        super().__init__()
+        self.num_classes = num_classes
+        self.heatmap_size = heatmap_size
+
+        resnet = torchvision.models.resnet18(weights='IMAGENET1K_V1' if pretrained else None)
+        if in_channels != 3:
+            resnet.conv1 = _adapt_first_conv(resnet.conv1, in_channels)
+
+        self.spatial_encoder = nn.Sequential(*list(resnet.children())[:-2])
+        if freeze_backbone:
+            for param in self.spatial_encoder.parameters():
+                param.requires_grad = False
+
+        self.feature_reduce = nn.Sequential(
+            nn.Conv2d(512, 128, kernel_size=1),
+            nn.ReLU(inplace=True),
+        )
+        self.pool = nn.AdaptiveAvgPool2d(heatmap_size)
+
+        self.classifier = nn.Sequential(
+            nn.Flatten(),
+            nn.Linear(128 * heatmap_size[0] * heatmap_size[1], 256),
+            nn.ReLU(inplace=True),
+            nn.Dropout(0.5),
+            nn.Linear(256, num_classes),
+        )
+
+        self.heatmap_head = nn.Sequential(
+            nn.Conv2d(128, 64, kernel_size=3, padding=1),
+            nn.ReLU(inplace=True),
+            nn.Conv2d(64, 32, kernel_size=3, padding=1),
+            nn.ReLU(inplace=True),
+            nn.Conv2d(32, num_classes, kernel_size=1),
+        )
+
+    def forward(self, x):
+        B, T, C, H, W = x.shape
+        x = x.view(B, T * C, H, W)
+
+        spatial_features = self.spatial_encoder(x)
+        reduced = self.feature_reduce(spatial_features)
+        pooled = self.pool(reduced)
+
+        class_logits = self.classifier(pooled)
+        heatmaps = self.heatmap_head(pooled)
+        return class_logits, heatmaps
+
+    def decode_predictions(
+        self,
+        class_logits: torch.Tensor,
+        heatmaps: torch.Tensor,
+        score_threshold: float = 0.3,
+        nms_kernel: int = 3,
+    ) -> list[dict]:
+        batch_size = class_logits.shape[0]
+        class_probs = torch.sigmoid(class_logits)
+
+        results = []
+
+        for b in range(batch_size):
+            batch_detections = {
+                'class_probs': class_probs[b].cpu(),
+                'detections': []
+            }
+
+            for class_id in range(self.num_classes):
+                heatmap = torch.sigmoid(heatmaps[b, class_id])
+                peaks = self._find_peaks(heatmap, threshold=score_threshold, kernel_size=nms_kernel)
+
+                for y, x, score in peaks:
+                    batch_detections['detections'].append({
+                        'class': class_id,
+                        'center': (x.item(), y.item()),
+                        'score': score.item(),
+                    })
+
+            results.append(batch_detections)
+
+        return results
+
+    @staticmethod
+    def _find_peaks(
+        heatmap: torch.Tensor,
+        threshold: float,
+        kernel_size: int = 3,
+    ) -> list[tuple]:
+        max_pooled = F.max_pool2d(
+            heatmap.unsqueeze(0).unsqueeze(0),
+            kernel_size=kernel_size,
+            stride=1,
+            padding=kernel_size // 2
+        ).squeeze()
+
+        peaks_mask = (heatmap == max_pooled) & (heatmap > threshold)
+        peak_coords = torch.nonzero(peaks_mask, as_tuple=False)
+        peak_scores = heatmap[peaks_mask]
+
+        return [(y, x, score) for (y, x), score in zip(peak_coords, peak_scores)]
+
+
+class DiffStreamObjectDetector(FrameStackObjectDetector):
+    """2D CNN detector using frame differences as input (9-channel input)."""
+
+    def __init__(
+        self,
+        num_classes: int = 2,
+        pretrained: bool = True,
+        freeze_backbone: bool = True,
+        heatmap_size: tuple[int, int] = (8, 8),
+    ):
+        super().__init__(
+            num_classes=num_classes,
+            pretrained=pretrained,
+            freeze_backbone=freeze_backbone,
+            heatmap_size=heatmap_size,
+            in_channels=9,
+        )
+
+    def forward(self, x):
+        diffs = x[:, 1:] - x[:, :-1]
+        B, Tm1, C, H, W = diffs.shape
+        diffs = diffs.view(B, Tm1 * C, H, W)
+
+        spatial_features = self.spatial_encoder(diffs)
+        reduced = self.feature_reduce(spatial_features)
+        pooled = self.pool(reduced)
+
+        class_logits = self.classifier(pooled)
+        heatmaps = self.heatmap_head(pooled)
+        return class_logits, heatmaps
 
 
 def test_temporal_detector():

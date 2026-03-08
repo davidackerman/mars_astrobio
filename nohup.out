@@ -1,0 +1,95 @@
+usage: train_crop_classifier.py [-h] --data-dir DATA_DIR --annotations-path
+                                ANNOTATIONS_PATH [--crop-size CROP_SIZE]
+                                [--samples-per-subject SAMPLES_PER_SUBJECT]
+                                [--positive-fraction POSITIVE_FRACTION]
+                                [--batch-size BATCH_SIZE]
+                                [--num-epochs NUM_EPOCHS] [--lr LR]
+                                [--weight-decay WEIGHT_DECAY]
+                                [--base-channels BASE_CHANNELS]
+                                [--dropout DROPOUT] [--device DEVICE]
+                                [--seed SEED] [--threshold THRESHOLD]
+                                [--threshold-sweep] [--use-pos-weight]
+                                [--no-augmentation] [--no-noise] [--no-blur]
+                                [--balanced-sampling]
+                                [--negative-ratio NEGATIVE_RATIO]
+                                [--any-object] [--no-crop]
+                                [--positive-jitter POSITIVE_JITTER]
+                                [--val-fraction VAL_FRACTION]
+                                [--val-subjects VAL_SUBJECTS]
+                                [--early-stopping-patience EARLY_STOPPING_PATIENCE]
+                                [--early-stopping-delta EARLY_STOPPING_DELTA]
+                                [--early-stopping-metric {val_loss,val_loss_ema,micro_f1,micro_f1_ema}]
+                                [--early-stopping-ema-alpha EARLY_STOPPING_EMA_ALPHA]
+                                [--loss {bce,softf1,bce+softf1,focal}]
+                                [--softf1-weight SOFTF1_WEIGHT]
+                                [--save-checkpoints SAVE_CHECKPOINTS]
+                                [--lr-scheduler {plateau,none}]
+                                [--lr-factor LR_FACTOR]
+                                [--lr-patience LR_PATIENCE] [--lr-min LR_MIN]
+                                [--focal-alpha FOCAL_ALPHA]
+                                [--focal-gamma FOCAL_GAMMA]
+                                [--checkpoint-every CHECKPOINT_EVERY]
+                                [--negative-bright-fraction NEGATIVE_BRIGHT_FRACTION]
+                                [--negative-bright-percentile NEGATIVE_BRIGHT_PERCENTILE]
+                                [--negative-bright-samples NEGATIVE_BRIGHT_SAMPLES]
+train_crop_classifier.py: error: unrecognized arguments: \
+2026-01-14 22:17:30,594 - INFO - Command: scripts/train_crop_classifier.py --data-dir data/backyard_worlds/synthetic_movers_blinkers --annotations-path data/backyard_worlds/synthetic_movers_blinkers/annotations.json --crop-size 64,64 --samples-per-subject 20 --positive-fraction 0.5 --val-fraction 0.25 --positive-jitter 32,32 --no-crop --no-noise --no-blur --any-object --negative-bright-fraction 0.75 --negative-bright-percentile 95 --negative-bright-samples 200 --num-epochs 1000 --checkpoint-every 10
+Traceback (most recent call last):
+  File "/mnt/bigdisk/Programming/mars_astrobio/scripts/train_crop_classifier.py", line 708, in <module>
+    main()
+  File "/mnt/bigdisk/Programming/mars_astrobio/scripts/train_crop_classifier.py", line 496, in main
+    base_dataset = BackyardWorldsTemporalCropDataset(
+                   ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/mnt/bigdisk/Programming/mars_astrobio/src/scientific_pipelines/core/training/datasets/temporal_crop_dataset.py", line 93, in __init__
+    ) = self._load_subject_sizes()
+        ^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/mnt/bigdisk/Programming/mars_astrobio/src/scientific_pipelines/core/training/datasets/temporal_crop_dataset.py", line 240, in _load_subject_sizes
+    bright_thresholds[subject_id] = self._estimate_bright_threshold(
+                                    ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/mnt/bigdisk/Programming/mars_astrobio/src/scientific_pipelines/core/training/datasets/temporal_crop_dataset.py", line 257, in _estimate_bright_threshold
+    samples.append(self._crop_mean_brightness(integral, (cx, cy), image_size))
+                   ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/mnt/bigdisk/Programming/mars_astrobio/src/scientific_pipelines/core/training/datasets/temporal_crop_dataset.py", line 268, in _crop_mean_brightness
+    left, top, right, bottom = self._compute_crop_bounds(center, image_size)
+                               ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/mnt/bigdisk/Programming/mars_astrobio/src/scientific_pipelines/core/training/datasets/temporal_crop_dataset.py", line 356, in _compute_crop_bounds
+    top = int(np.clip(cy - half_h, 0, h - crop_h))
+              ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/mnt/bigdisk/Programming/mars_astrobio/.pixi/envs/default/lib/python3.12/site-packages/numpy/_core/fromnumeric.py", line 2236, in _clip_dispatcher
+    def _clip_dispatcher(a, a_min=None, a_max=None, out=None, *, min=None,
+    
+KeyboardInterrupt
+2026-01-14 22:18:03,001 - INFO - Command: scripts/train_crop_classifier.py --data-dir data/backyard_worlds/synthetic_movers_blinkers --annotations-path data/backyard_worlds/synthetic_movers_blinkers/annotations.json --crop-size 64,64 --samples-per-subject 20 --positive-fraction 0.5 --val-fraction 0.25 --positive-jitter 32,32 --no-crop --no-noise --no-blur --any-object --negative-bright-fraction 0.75 --negative-bright-percentile 95 --negative-bright-samples 200 --num-epochs 1000 --checkpoint-every 10
+Traceback (most recent call last):
+  File "/mnt/bigdisk/Programming/mars_astrobio/scripts/train_crop_classifier.py", line 708, in <module>
+    main()
+  File "/mnt/bigdisk/Programming/mars_astrobio/scripts/train_crop_classifier.py", line 496, in main
+    base_dataset = BackyardWorldsTemporalCropDataset(
+                   ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/mnt/bigdisk/Programming/mars_astrobio/src/scientific_pipelines/core/training/datasets/temporal_crop_dataset.py", line 93, in __init__
+    ) = self._load_subject_sizes()
+        ^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/mnt/bigdisk/Programming/mars_astrobio/src/scientific_pipelines/core/training/datasets/temporal_crop_dataset.py", line 227, in _load_subject_sizes
+    frame = cv2.imread(str(frame_path))
+            ^^^^^^^^^^^^^^^^^^^^^^^^^^^
+KeyboardInterrupt
+2026-01-14 22:18:28,275 - INFO - Command: scripts/train_crop_classifier.py --data-dir data/backyard_worlds/synthetic_movers_blinkers --annotations-path data/backyard_worlds/synthetic_movers_blinkers/annotations.json --crop-size 64,64 --samples-per-subject 20 --positive-fraction 0.5 --val-fraction 0.25 --positive-jitter 32,32 --no-crop --no-noise --no-blur --any-object --negative-bright-fraction 0.75 --negative-bright-percentile 95 --negative-bright-samples 200 --num-epochs 1000 --checkpoint-every 10
+2026-01-14 22:18:30,448 - INFO - Loaded 200 annotated sequences
+2026-01-14 22:18:30,448 - INFO - Generated 4000 crop samples
+2026-01-14 22:18:30,519 - INFO - Using single split: 150 train subjects, 50 val subjects
+2026-01-14 22:18:30,519 - INFO - Split run | Val subjects=50
+2026-01-14 22:18:32,186 - INFO - Loaded 200 annotated sequences
+2026-01-14 22:18:32,187 - INFO - Generated 4000 crop samples
+Traceback (most recent call last):
+  File "/mnt/bigdisk/Programming/mars_astrobio/scripts/train_crop_classifier.py", line 708, in <module>
+    main()
+  File "/mnt/bigdisk/Programming/mars_astrobio/scripts/train_crop_classifier.py", line 579, in main
+    val_dataset = BackyardWorldsTemporalCropDataset(
+                  ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/mnt/bigdisk/Programming/mars_astrobio/src/scientific_pipelines/core/training/datasets/temporal_crop_dataset.py", line 93, in __init__
+    ) = self._load_subject_sizes()
+        ^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/mnt/bigdisk/Programming/mars_astrobio/src/scientific_pipelines/core/training/datasets/temporal_crop_dataset.py", line 227, in _load_subject_sizes
+    frame = cv2.imread(str(frame_path))
+            ^^^^^^^^^^^^^^^^^^^^^^^^^^^
+KeyboardInterrupt
