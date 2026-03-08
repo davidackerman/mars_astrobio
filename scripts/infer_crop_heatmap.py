@@ -6,6 +6,7 @@ Run crop classifier over a full sequence and export heatmap overlays.
 import argparse
 import csv
 import json
+from concurrent.futures import ProcessPoolExecutor, as_completed
 from pathlib import Path
 from typing import List, Tuple
 
@@ -19,6 +20,117 @@ sys.path.insert(0, str(Path(__file__).parent.parent / 'src'))
 from scientific_pipelines.core.training.models import TemporalCropClassifier
 from scientific_pipelines.core.training.datasets.augmentation import TemporalSequenceAugmentation
 from scientific_pipelines.core.training.datasets.crop_config import crop_bounds, crop_frames
+
+_WORKER_MODEL = None
+_WORKER_CONFIG = None
+_WORKER_ANNOTATIONS = None
+
+
+def _init_worker(config: dict, checkpoint_path: str) -> None:
+    global _WORKER_MODEL, _WORKER_CONFIG, _WORKER_ANNOTATIONS
+    _WORKER_CONFIG = config
+    device = config["device"]
+    checkpoint = load_checkpoint(Path(checkpoint_path))
+    model = TemporalCropClassifier(
+        num_classes=1 if config["any_object"] else 2,
+        base_channels=config["base_channels"],
+    )
+    model.load_state_dict(checkpoint["model_state_dict"])
+    model.to(device)
+    model.eval()
+    _WORKER_MODEL = model
+    if config["draw_annotations"]:
+        try:
+            _WORKER_ANNOTATIONS = load_annotations(Path(config["annotations_path"]))
+        except FileNotFoundError as exc:
+            print(f"Warning: {exc}. Disabling annotation overlays.")
+            _WORKER_CONFIG["draw_annotations"] = False
+            _WORKER_ANNOTATIONS = None
+
+
+def _process_subject(subject_id: str) -> list:
+    cfg = _WORKER_CONFIG
+    frames_dir = Path(cfg["subjects_dir"]) / subject_id
+    if not has_required_frames(frames_dir):
+        print(f"Skipping {subject_id}: missing one or more frame_00..03.jpg files")
+        return []
+    frames, original_size = load_frames(frames_dir, apply_crop=not cfg["no_crop"])
+    score_map = build_score_map(
+        frames,
+        _WORKER_MODEL,
+        cfg["crop_size"],
+        cfg["stride"],
+        cfg["device"],
+        cfg["any_object"],
+        cfg["normalize"],
+        cfg["threshold_low"],
+        cfg["threshold_value"],
+        cfg["batch_size"],
+    )
+    annotation_boxes = None
+    if cfg["draw_annotations"]:
+        annotation_boxes = get_annotation_boxes(_WORKER_ANNOTATIONS, subject_id)
+        annotation_boxes = {
+            key: adjust_boxes_for_crop(boxes, original_size, apply_crop=not cfg["no_crop"])
+            for key, boxes in annotation_boxes.items()
+        }
+    summary_rows = []
+    out_dir = Path(cfg["out_dir"])
+    contour_color = cfg["contour_color"]
+    for class_idx in range(score_map.shape[0]):
+        peak_score = float(score_map[class_idx].max())
+        filename_prefix = f"{peak_score:.4f}_"
+        summary_rows.append(
+            {
+                "subject_id": subject_id,
+                "class_idx": class_idx,
+                "peak_score": peak_score,
+            }
+        )
+        peaks = extract_peaks(score_map[class_idx], cfg["threshold"])
+        out_path = out_dir / f"{filename_prefix}{subject_id}_class_{class_idx}_overlay.png"
+        overlay = build_overlay(
+            frames[0],
+            score_map[class_idx],
+            peaks,
+            cfg["overlay_alpha"],
+            cfg["contour_level"],
+            contour_color,
+            cfg["contour_thickness"],
+            annotation_boxes,
+            cfg["annotation_thickness"],
+        )
+        cv2.imwrite(str(out_path), overlay)
+        if cfg["side_by_side"]:
+            side_path = out_dir / f"{filename_prefix}{subject_id}_class_{class_idx}_side_by_side.png"
+            save_side_by_side(frames[0], overlay, side_path)
+        if cfg["save_raw_heatmap"]:
+            raw_path = out_dir / f"{filename_prefix}{subject_id}_class_{class_idx}_raw.png"
+            save_raw_heatmap(score_map[class_idx], raw_path)
+        if cfg["save_gif"]:
+            try:
+                import imageio.v2 as imageio
+            except ImportError as exc:
+                raise SystemExit("imageio is required for --save-gif") from exc
+            gif_path = out_dir / f"{filename_prefix}{subject_id}_class_{class_idx}_overlay.gif"
+            gif_frames = []
+            for frame in frames:
+                gif_overlay = build_overlay(
+                    frame,
+                    score_map[class_idx],
+                    [],
+                    cfg["overlay_alpha"],
+                    cfg["contour_level"],
+                    contour_color,
+                    cfg["contour_thickness"],
+                    annotation_boxes,
+                    cfg["annotation_thickness"],
+                )
+                gif_frames.append(cv2.cvtColor(gif_overlay, cv2.COLOR_BGR2RGB))
+            with imageio.get_writer(gif_path, mode="I", duration=2.5, loop=0) as writer:
+                for frame in gif_frames:
+                    writer.append_data(frame)
+    return summary_rows
 
 
 def parse_size(value: str) -> Tuple[int, int]:
@@ -328,6 +440,12 @@ def main() -> None:
     parser.add_argument("--base-channels", type=int, default=16)
     parser.add_argument("--batch-size", type=int, default=64, help="Batch size for window inference")
     parser.add_argument("--device", type=str, default="cuda" if torch.cuda.is_available() else "cpu")
+    parser.add_argument("--num-workers", type=int, default=0, help="Parallel workers for subject inference")
+    parser.add_argument(
+        "--allow-cuda-workers",
+        action="store_true",
+        help="Allow CUDA inference in worker processes (may exhaust GPU memory)",
+    )
     parser.add_argument("--save-raw-heatmap", action="store_true", help="Save raw heatmap as grayscale PNG")
     parser.add_argument("--overlay-alpha", type=float, default=0.45, help="Max overlay alpha for heatmap (0-1)")
     parser.add_argument(
@@ -365,6 +483,9 @@ def main() -> None:
     )
     args = parser.parse_args()
     contour_color = tuple(int(x) for x in args.contour_color.split(","))
+    if args.num_workers > 0 and args.device.startswith("cuda") and not args.allow_cuda_workers:
+        print("Warning: disabling CUDA for multi-worker inference; use --allow-cuda-workers to override.")
+        args.device = "cpu"
     annotations = None
     if args.draw_annotations:
         annotations_path = args.annotations_path or (args.data_dir / "annotations.json")
@@ -373,14 +494,6 @@ def main() -> None:
         except FileNotFoundError as exc:
             print(f"Warning: {exc}. Disabling annotation overlays.")
             args.draw_annotations = False
-
-    checkpoint = load_checkpoint(args.checkpoint)
-    model = TemporalCropClassifier(
-        num_classes=1 if args.any_object else 2,
-        base_channels=args.base_channels,
-    )
-    model.load_state_dict(checkpoint["model_state_dict"])
-    model.to(args.device)
 
     subjects_dir = args.data_dir / "subjects_groundtruth"
     if not subjects_dir.exists():
@@ -393,85 +506,127 @@ def main() -> None:
 
     args.out_dir.mkdir(parents=True, exist_ok=True)
     summary_rows = []
-    for subject_id in subject_ids:
-        frames_dir = subjects_dir / subject_id
-        if not has_required_frames(frames_dir):
-            print(f"Skipping {subject_id}: missing one or more frame_00..03.jpg files")
-            continue
-        frames, original_size = load_frames(frames_dir, apply_crop=not args.no_crop)
-        score_map = build_score_map(
-            frames,
-            model,
-            args.crop_size,
-            args.stride,
-            args.device,
-            args.any_object,
-            args.normalize,
-            args.threshold_low,
-            args.threshold_value,
-            args.batch_size,
+    if args.num_workers > 0:
+        config = {
+            "subjects_dir": str(subjects_dir),
+            "out_dir": str(args.out_dir),
+            "crop_size": args.crop_size,
+            "stride": args.stride,
+            "device": args.device,
+            "any_object": args.any_object,
+            "normalize": args.normalize,
+            "threshold_low": args.threshold_low,
+            "threshold_value": args.threshold_value,
+            "batch_size": args.batch_size,
+            "threshold": args.threshold,
+            "overlay_alpha": args.overlay_alpha,
+            "contour_level": args.contour_level,
+            "contour_color": contour_color,
+            "contour_thickness": args.contour_thickness,
+            "annotations_path": str(args.annotations_path or (args.data_dir / "annotations.json")),
+            "draw_annotations": args.draw_annotations,
+            "annotation_thickness": args.annotation_thickness,
+            "side_by_side": args.side_by_side,
+            "save_gif": args.save_gif,
+            "save_raw_heatmap": args.save_raw_heatmap,
+            "no_crop": args.no_crop,
+            "base_channels": args.base_channels,
+        }
+        with ProcessPoolExecutor(
+            max_workers=args.num_workers,
+            initializer=_init_worker,
+            initargs=(config, str(args.checkpoint)),
+        ) as executor:
+            futures = {executor.submit(_process_subject, sid): sid for sid in subject_ids}
+            for future in as_completed(futures):
+                summary_rows.extend(future.result())
+    else:
+        checkpoint = load_checkpoint(args.checkpoint)
+        model = TemporalCropClassifier(
+            num_classes=1 if args.any_object else 2,
+            base_channels=args.base_channels,
         )
-        annotation_boxes = None
-        if args.draw_annotations:
-            annotation_boxes = get_annotation_boxes(annotations, subject_id)
-            annotation_boxes = {
-                key: adjust_boxes_for_crop(boxes, original_size, apply_crop=not args.no_crop)
-                for key, boxes in annotation_boxes.items()
-            }
-        for class_idx in range(score_map.shape[0]):
-            peak_score = float(score_map[class_idx].max())
-            filename_prefix = f"{peak_score:.4f}_"
-            summary_rows.append(
-                {
-                    "subject_id": subject_id,
-                    "class_idx": class_idx,
-                    "peak_score": peak_score,
+        model.load_state_dict(checkpoint["model_state_dict"])
+        model.to(args.device)
+        for subject_id in subject_ids:
+            frames_dir = subjects_dir / subject_id
+            if not has_required_frames(frames_dir):
+                print(f"Skipping {subject_id}: missing one or more frame_00..03.jpg files")
+                continue
+            frames, original_size = load_frames(frames_dir, apply_crop=not args.no_crop)
+            score_map = build_score_map(
+                frames,
+                model,
+                args.crop_size,
+                args.stride,
+                args.device,
+                args.any_object,
+                args.normalize,
+                args.threshold_low,
+                args.threshold_value,
+                args.batch_size,
+            )
+            annotation_boxes = None
+            if args.draw_annotations:
+                annotation_boxes = get_annotation_boxes(annotations, subject_id)
+                annotation_boxes = {
+                    key: adjust_boxes_for_crop(boxes, original_size, apply_crop=not args.no_crop)
+                    for key, boxes in annotation_boxes.items()
                 }
-            )
-            peaks = extract_peaks(score_map[class_idx], args.threshold)
-            out_path = args.out_dir / f"{filename_prefix}{subject_id}_class_{class_idx}_overlay.png"
-            overlay = build_overlay(
-                frames[0],
-                score_map[class_idx],
-                peaks,
-                args.overlay_alpha,
-                args.contour_level,
-                contour_color,
-                args.contour_thickness,
-                annotation_boxes,
-                args.annotation_thickness,
-            )
-            cv2.imwrite(str(out_path), overlay)
-            if args.side_by_side:
-                side_path = args.out_dir / f"{filename_prefix}{subject_id}_class_{class_idx}_side_by_side.png"
-                save_side_by_side(frames[0], overlay, side_path)
-            if args.save_raw_heatmap:
-                raw_path = args.out_dir / f"{filename_prefix}{subject_id}_class_{class_idx}_raw.png"
-                save_raw_heatmap(score_map[class_idx], raw_path)
-            if args.save_gif:
-                try:
-                    import imageio.v2 as imageio
-                except ImportError as exc:
-                    raise SystemExit("imageio is required for --save-gif") from exc
-                gif_path = args.out_dir / f"{filename_prefix}{subject_id}_class_{class_idx}_overlay.gif"
-                gif_frames = []
-                for frame in frames:
-                    gif_overlay = build_overlay(
-                        frame,
-                        score_map[class_idx],
-                        [],
-                        args.overlay_alpha,
-                        args.contour_level,
-                        contour_color,
-                        args.contour_thickness,
-                        annotation_boxes,
-                        args.annotation_thickness,
-                    )
-                    gif_frames.append(cv2.cvtColor(gif_overlay, cv2.COLOR_BGR2RGB))
-                # Use writer to embed frame durations reliably for GIF viewers.
-                with imageio.get_writer(gif_path, mode="I", duration=2.5, loop=0) as writer:
-                    for frame in gif_frames:
-                        writer.append_data(frame)
+            for class_idx in range(score_map.shape[0]):
+                peak_score = float(score_map[class_idx].max())
+                filename_prefix = f"{peak_score:.4f}_"
+                summary_rows.append(
+                    {
+                        "subject_id": subject_id,
+                        "class_idx": class_idx,
+                        "peak_score": peak_score,
+                    }
+                )
+                peaks = extract_peaks(score_map[class_idx], args.threshold)
+                out_path = args.out_dir / f"{filename_prefix}{subject_id}_class_{class_idx}_overlay.png"
+                overlay = build_overlay(
+                    frames[0],
+                    score_map[class_idx],
+                    peaks,
+                    args.overlay_alpha,
+                    args.contour_level,
+                    contour_color,
+                    args.contour_thickness,
+                    annotation_boxes,
+                    args.annotation_thickness,
+                )
+                cv2.imwrite(str(out_path), overlay)
+                if args.side_by_side:
+                    side_path = args.out_dir / f"{filename_prefix}{subject_id}_class_{class_idx}_side_by_side.png"
+                    save_side_by_side(frames[0], overlay, side_path)
+                if args.save_raw_heatmap:
+                    raw_path = args.out_dir / f"{filename_prefix}{subject_id}_class_{class_idx}_raw.png"
+                    save_raw_heatmap(score_map[class_idx], raw_path)
+                if args.save_gif:
+                    try:
+                        import imageio.v2 as imageio
+                    except ImportError as exc:
+                        raise SystemExit("imageio is required for --save-gif") from exc
+                    gif_path = args.out_dir / f"{filename_prefix}{subject_id}_class_{class_idx}_overlay.gif"
+                    gif_frames = []
+                    for frame in frames:
+                        gif_overlay = build_overlay(
+                            frame,
+                            score_map[class_idx],
+                            [],
+                            args.overlay_alpha,
+                            args.contour_level,
+                            contour_color,
+                            args.contour_thickness,
+                            annotation_boxes,
+                            args.annotation_thickness,
+                        )
+                        gif_frames.append(cv2.cvtColor(gif_overlay, cv2.COLOR_BGR2RGB))
+                    # Use writer to embed frame durations reliably for GIF viewers.
+                    with imageio.get_writer(gif_path, mode="I", duration=2.5, loop=0) as writer:
+                        for frame in gif_frames:
+                            writer.append_data(frame)
 
     if summary_rows:
         summary_path = args.out_dir / "heatmap_peaks.csv"
